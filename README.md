@@ -37,6 +37,7 @@ Scroll to zoom, drag to pan, Ctrl+Z to undo.
 - Exposure, contrast, black and white point, shadows, highlights, curves (all channels and per channel)
 - Multi-pass averaging and multi-exposure for cleaner dense areas
 - 900 to 7200 dpi; 48-bit TIFF, 24-bit TIFF or JPEG; sRGB, Adobe RGB or ProPhoto
+- Print output: any CMYK or print RGB profile installed in Windows (ISO Coated v2 / FOGRA39, PSO, SWOP, eciRGB ...), or dropped into a `profiles` folder; saved 8-bit with the profile embedded
 - Presets, including Cinematic and Renaissance painting looks
 - Optional raw file per scan, which can be reopened and developed again
 

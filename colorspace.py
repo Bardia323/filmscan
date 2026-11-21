@@ -1,4 +1,6 @@
 """Output colour spaces: conversion from the pipeline's sRGB-encoded result, and ICC profiles to embed."""
+import glob
+import os
 import struct
 
 import numpy as np
@@ -61,3 +63,65 @@ def icc(space):
     head += struct.pack(">I", 0) + _s15(0.9642) + _s15(1.0) + _s15(0.8249) + b"\0" * 4
     head += b"\0" * (128 - len(head))
     return head + struct.pack(">I", len(tags)) + table + data
+
+
+# -- installed ICC profiles (print standards: ISO Coated / FOGRA, PSO, SWOP, GRACoL, eciRGB ...) ---------------------
+# These are not shipped with the app. It offers whatever is installed in Windows' colour folder, plus any profile
+# dropped into a "profiles" folder next to the app. Conversion is done by LittleCMS (through Pillow), from sRGB.
+
+PROFILE_DIRS = [os.path.join(os.environ.get("WINDIR", "C:/Windows"), "System32", "spool", "drivers", "color"),
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")]
+_RGB_PRINT_NAMES = ("ecirgb",)                 # RGB working spaces worth listing besides the built-in three
+_found = None
+
+
+def installed_profiles(refresh=False):
+    """[{id, name, kind, path}] for CMYK print profiles and print-oriented RGB spaces found on this machine."""
+    global _found
+    if _found is not None and not refresh:
+        return _found
+    from PIL import ImageCms
+    out, seen = [], set()
+    for d in PROFILE_DIRS:
+        own = os.path.basename(d) == "profiles"
+        for path in sorted(glob.glob(os.path.join(d, "*.ic[cm]"))):
+            try:
+                p = ImageCms.getOpenProfile(path)
+                kind = p.profile.xcolor_space.strip()
+                name = ImageCms.getProfileDescription(p).strip() or os.path.basename(path)
+            except Exception:
+                continue
+            if kind == "CMYK" or (kind == "RGB" and (own or any(k in name.lower() for k in _RGB_PRINT_NAMES))):
+                if name in seen:
+                    continue
+                seen.add(name)
+                out.append(dict(id="icc:" + os.path.basename(path), name=name, kind=kind, path=path))
+    _found = sorted(out, key=lambda e: (e["kind"] != "RGB", e["name"].lower()))
+    return _found
+
+
+def find_profile(space):
+    """The installed profile for a colour-space id like 'icc:ISOcoated_v2_eci.icc', or None."""
+    if not isinstance(space, str) or not space.startswith("icc:"):
+        return None
+    for e in installed_profiles():
+        if e["id"] == space:
+            return e
+    return None
+
+
+def convert_with_profile(y, entry):
+    """y: float32 HxWx3, sRGB-encoded 0..1 -> (uint8 array in the profile's space, mode 'CMYK' or 'RGB', profile bytes).
+
+    Relative colorimetric with black point compensation, the usual choice for photographs going to print.
+    8 bits per channel: that is what the conversion engine offers here."""
+    from PIL import Image, ImageCms
+    src = Image.fromarray((np.clip(y, 0, 1) * 255.0 + 0.5).astype(np.uint8), "RGB")
+    dst_profile = ImageCms.getOpenProfile(entry["path"])
+    mode = "CMYK" if entry["kind"] == "CMYK" else "RGB"
+    t = ImageCms.buildTransform(ImageCms.createProfile("sRGB"), dst_profile, "RGB", mode,
+                                renderingIntent=ImageCms.Intent.RELATIVE_COLORIMETRIC,
+                                flags=ImageCms.Flags.BLACKPOINTCOMPENSATION)
+    out = ImageCms.applyTransform(src, t)
+    with open(entry["path"], "rb") as f:
+        return np.asarray(out), mode, f.read()

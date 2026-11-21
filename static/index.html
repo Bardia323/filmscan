@@ -212,6 +212,21 @@ async function api(path, body) {
 function say(text, err) { const m = $("msg"); m.textContent = text || ""; m.classList.toggle("err", !!err); }
 
 /* ---- state -> UI ---- */
+/* Colour spaces: the three built in, then whatever print profiles are installed on this computer. */
+let spacesKey = null;
+function fillSpaces(s) {
+  const list = s.colorspaces || [], key = list.map(e => e.id).join("|");
+  if (key === spacesKey) return;
+  spacesKey = key;
+  const sel = $("cspace"); sel.innerHTML = "";
+  const add = (parent, id, name) => { const o = document.createElement("option"); o.value = id; o.textContent = name; parent.appendChild(o); };
+  add(sel, "srgb", "sRGB"); add(sel, "adobe", "Adobe RGB (1998)"); add(sel, "prophoto", "ProPhoto RGB");
+  for (const [kind, label] of [["RGB", "Print RGB (installed, 8-bit)"], ["CMYK", "CMYK print profiles (installed, 8-bit)"]]) {
+    const items = list.filter(e => e.kind === kind); if (!items.length) continue;
+    const g = document.createElement("optgroup"); g.label = label; items.forEach(e => add(g, e.id, e.name)); sel.appendChild(g);
+  }
+}
+
 /* ---- undo / redo ----
    A snapshot is everything that changes how the picture looks or is framed. A burst of changes (dragging a slider,
    moving a crop edge) becomes one step once it has been still for half a second. A new preview or scan starts a
@@ -279,7 +294,7 @@ function apply(s, fromUser) {
   if (!fromUser) {
     for (const k of SLIDERS) if (document.activeElement !== $(k)) $(k).value = s.settings[k];
     if (document.activeElement !== $("out_dir")) $("out_dir").value = s.out_dir;
-    $("dpi").value = s.scan_dpi; $("pdpi").value = s.preview_dpi; $("fmt").value = s.fmt; $("cspace").value = s.colorspace; $("samples").value = s.samples; $("mexp").value = s.multi_exposure; $("film").value = s.settings.mono ? (s.settings.negative ? "bw" : "bwslide") : (s.settings.negative ? "neg" : "slide");
+    $("dpi").value = s.scan_dpi; $("pdpi").value = s.preview_dpi; $("fmt").value = s.fmt; fillSpaces(s); $("cspace").value = s.colorspace; $("samples").value = s.samples; $("mexp").value = s.multi_exposure; $("film").value = s.settings.mono ? (s.settings.negative ? "bw" : "bwslide") : (s.settings.negative ? "neg" : "slide");
   }
   for (const k of SLIDERS) $(k).nextElementSibling.textContent = (+$(k).value).toFixed(2);
   const mono = s.settings.mono, irOn = s.infrared && !mono;

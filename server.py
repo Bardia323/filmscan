@@ -43,7 +43,7 @@ class State:
         self.jpeg_quality = 95
         self.samples = 1                  # colour passes averaged per scan
         self.multi_exposure = 0           # 0 = off, 2 or 4 = extra long-exposure pass merged in
-        self.colorspace = "srgb"          # srgb | adobe | prophoto
+        self.colorspace = "srgb"          # srgb | adobe | prophoto | icc:<file name of an installed profile>
         self.window = None                # native window, for file dialogs
         self.cancel = False               # set to stop the running scan
         self.infrared = True
@@ -106,6 +106,7 @@ class State:
                         infrared=self.infrared, fmt=self.fmt, preview_dpi=self.preview_dpi, save_raw=self.save_raw,
                         jpeg_quality=self.jpeg_quality, samples=self.samples, colorspace=self.colorspace,
                         multi_exposure=self.multi_exposure,
+                        colorspaces=[dict(id=e["id"], name=e["name"], kind=e["kind"]) for e in colorspace.installed_profiles()],
                         has_preview=self.preview_rgb is not None, src_size=self.src_size(),
                         viewing="scan" if self.full_rgb is not None else "preview",
                         has_full=self.full_rgb is not None, full_dpi=self.full_dpi, last_file=self.last_file,
@@ -335,16 +336,30 @@ def write_raw(rgb, ir, dpi, path):
 def write_output(rgb, ir, settings, fmt, dpi, path=None):
     space = "srgb" if settings.mono else S.colorspace
     y = film.develop(rgb, ir, settings, out_bits=0, ref_width=int(1.44 * dpi))
+    ext = "jpg" if fmt == "jpeg" else "tif"
+    path = path or next_filename(ext)
+    entry = colorspace.find_profile(space)
+    if entry is not None:
+        # An installed print profile (CMYK or RGB). Converted by the colour engine at 8 bits per channel,
+        # whatever bit depth is selected, with the profile embedded.
+        data, mode, icc_bytes = colorspace.convert_with_profile(y, entry)
+        del y
+        img = Image.fromarray(data, mode)
+        if fmt == "jpeg":
+            img.save(path, quality=int(S.jpeg_quality), subsampling=0, dpi=(dpi, dpi), icc_profile=icc_bytes)
+        else:
+            img.save(path, compression="tiff_adobe_deflate" if fmt == "tiff8" else None, dpi=(dpi, dpi), icc_profile=icc_bytes)
+        return path
+    if space.startswith("icc:"):                           # the chosen profile is no longer installed
+        space = "srgb"
     out = film.quantise(colorspace.convert(y, space), 16 if fmt == "tiff16" else 8)
     del y
     if settings.mono:
         out = np.ascontiguousarray(out[..., 0])           # black-and-white saves as a single grey channel
     if fmt == "jpeg":
-        path = path or next_filename("jpg")
         Image.fromarray(out).save(path, quality=int(S.jpeg_quality), subsampling=0, dpi=(dpi, dpi),
                                   **({} if settings.mono else {"icc_profile": colorspace.icc(space)}))
     else:
-        path = path or next_filename("tif")
         tifffile.imwrite(path, out, photometric="minisblack" if settings.mono else "rgb",
                          compression="zlib" if fmt == "tiff8" else None,
                          resolution=(dpi, dpi), resolutionunit="INCH",
