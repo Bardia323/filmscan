@@ -1,0 +1,804 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Film Scan</title>
+<style>
+  :root {
+    --bg: #121212; --panel: #1b1b1c; --line: #2c2c2e; --text: #e8e6e3; --dim: #8e8c88;
+    --accent: #e8a33d; --accent-ink: #1a1408; --bad: #e5604d; --good: #6fbf73; --field: #262628;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 13px/1.4 "Segoe UI", system-ui, sans-serif;
+         display: grid; grid-template-columns: minmax(0, 1fr) 340px; overflow: hidden; user-select: none; }
+
+  /* stage */
+  #stage { position: relative; display: flex; align-items: center; justify-content: center; padding: 20px 20px calc(var(--dock, 96px) + 24px); min-width: 0; }
+  #frame { position: relative; line-height: 0; max-width: 100%; max-height: 100%; }
+  #img { display: block; max-width: 100%; max-height: calc(100vh - 68px - var(--dock, 96px)); box-shadow: 0 6px 30px rgba(0,0,0,.6); }
+  #frame.pick #img, #frame.pick #crop { cursor: crosshair; }
+  .locked .crop { border-style: dashed; } .locked .crop, .locked .crop .h { pointer-events: none !important; }
+  .crop { position: absolute; border: 1px solid rgba(255,255,255,.55); box-shadow: 0 0 0 9999px rgba(0,0,0,.5); }
+  #crop { cursor: move; }
+  #zcrop { pointer-events: none; box-shadow: 0 0 0 9999px rgba(0,0,0,.38); }      /* zoomed: drag the picture to pan, edges to crop */
+  #clip, #zclip { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+  #clip > *, #zcrop .h { pointer-events: auto; }
+  /* grab zones along the edges and at the corners: nothing drawn, the cursor shows them */
+  .h { position: absolute; }
+  .h[data-h=n], .h[data-h=s] { left: 0; right: 0; height: 14px; cursor: ns-resize; } .h[data-h=n] { top: -7px; } .h[data-h=s] { bottom: -7px; }
+  .h[data-h=w], .h[data-h=e] { top: 0; bottom: 0; width: 14px; cursor: ew-resize; } .h[data-h=w] { left: -7px; } .h[data-h=e] { right: -7px; }
+  .h[data-h=nw], .h[data-h=ne], .h[data-h=sw], .h[data-h=se] { width: 18px; height: 18px; z-index: 1; }
+  .h[data-h=nw] { left: -9px; top: -9px; cursor: nwse-resize; } .h[data-h=ne] { right: -9px; top: -9px; cursor: nesw-resize; }
+  .h[data-h=sw] { left: -9px; bottom: -9px; cursor: nesw-resize; } .h[data-h=se] { right: -9px; bottom: -9px; cursor: nwse-resize; }
+  #loupe { position: absolute; inset: 20px 20px 48px 20px; display: none; align-items: center; justify-content: center;
+           background: rgba(10,10,10,.92); z-index: 5; cursor: zoom-out; flex-direction: column; gap: 8px; }
+  #loupe img { max-width: 100%; max-height: calc(100% - 28px); box-shadow: 0 6px 30px rgba(0,0,0,.7); image-rendering: pixelated; }
+  #loupe span { color: var(--dim); font-size: 12px; }
+  #viewbar { position: absolute; top: 10px; left: 20px; display: flex; gap: 6px; align-items: center; z-index: 4; color: var(--dim); }
+  #viewbar button { padding: 3px 9px; } #viewLabel { margin-right: 6px; } #viewLabel b { color: var(--text); font-weight: 600; }
+  #zoomWrap { position: absolute; inset: 44px 20px calc(var(--dock, 96px) + 24px) 20px; display: none; overflow: hidden; cursor: grab; touch-action: none; }
+  #zoomWrap.drag { cursor: grabbing; }
+  #zoomInner { position: absolute; line-height: 0; will-change: left, top, width, height; }
+  #zoomImg { display: block; width: 100%; height: 100%; }
+  #zoomImg.px { image-rendering: pixelated; }
+  #zcrop.solid { box-shadow: 0 0 0 9999px #121212; border-color: transparent; } #zcrop.solid .h { display: none; }
+  #stage { padding-top: 44px; }
+  #hint { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); background: var(--accent); color: var(--accent-ink);
+          padding: 6px 14px; border-radius: 16px; font-weight: 600; display: none; }
+  #dock { position: absolute; left: 20px; right: 20px; bottom: 12px; display: flex; flex-direction: column; gap: 8px; z-index: 4; }
+  #bar { display: flex; gap: 12px; align-items: center; color: var(--dim); min-height: 18px; }
+  #tools { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px 18px; }
+  .tg { display: flex; align-items: center; gap: 6px; } .tg .tl { color: var(--dim); }
+  .tg input[type=range] { width: 130px; flex: none; } .tg output { width: 38px; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .tg.main { order: -1; margin-right: auto; } .tg.main button { padding: 10px 26px; font-size: 14px; } #bCancel { order: 3; border-color: var(--bad); color: var(--bad); }
+  #prog { flex: 1; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; visibility: hidden; }
+  #prog i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s; }
+  #msg { min-width: 180px; } #msg.err { color: var(--bad); }
+
+  /* panel */
+  #panel { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 16px 16px 40px; }
+  details.sec { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 2px; }
+  details.sec > summary { list-style: none; cursor: pointer; padding: 11px 0 9px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+                          color: var(--dim); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+  details.sec > summary::-webkit-details-marker { display: none; }
+  details.sec > summary::after { content: "+"; font-size: 15px; font-weight: 400; letter-spacing: 0; }
+  details.sec[open] > summary::after { content: "–"; } details.sec[open] > summary { color: var(--text); }
+  details.sec > summary:hover { color: var(--text); } details.sec[open] { padding-bottom: 6px; }
+  h2 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin: 18px 0 8px; font-weight: 600; }
+  h2:first-child { margin-top: 0; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 9px 0; }
+  .row > label { flex: 0 0 82px; color: var(--dim); }
+  .row output { flex: 0 0 40px; text-align: right; font-variant-numeric: tabular-nums; color: var(--dim); }
+  input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 20px; }
+  button, select, input[type=text] { font: inherit; color: var(--text); background: var(--field); border: 1px solid var(--line);
+          border-radius: 6px; padding: 6px 10px; }
+  button { cursor: pointer; } button:hover { border-color: #55534f; } button:disabled { opacity: .45; cursor: default; }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 700; }
+  .big { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; } .big button { padding: 11px 8px; font-size: 14px; }
+  .seg { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr); }
+  .seg button { border-radius: 0; padding: 6px 2px; margin-left: -1px; } .seg button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+  .seg button:last-child { border-radius: 0 6px 6px 0; } .seg button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; position: relative; }
+  .btns { display: flex; gap: 6px; flex-wrap: wrap; } .btns button { flex: 1; white-space: nowrap; }
+  select, input[type=text] { flex: 1; min-width: 0; }
+  #status { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 10px; color: var(--dim); }
+  #dot { flex: 0 0 9px; height: 9px; border-radius: 50%; background: var(--bad); margin-top: 5px; } #dot.ok { background: var(--good); }
+  #swatch { flex: 0 0 26px; height: 26px; border-radius: 5px; border: 1px solid var(--line); }
+  .note { color: var(--dim); font-size: 12px; margin: 4px 0 0; }
+  #curveBox { margin: 10px 0 4px; } #curveBox .seg { grid-template-columns: repeat(4, 1fr) auto; margin-bottom: 6px; }
+  #curveBox .seg button:last-child { margin-left: 8px; border-radius: 6px; }
+  #curve { width: 100%; aspect-ratio: 3 / 2; display: block; background: #0c0c0c; border: 1px solid var(--line); border-radius: 6px; cursor: crosshair; touch-action: none; }
+  #hist { width: 100%; height: 64px; display: block; background: #0c0c0c; border: 1px solid var(--line); border-radius: 6px; }
+  #file { word-break: break-all; color: var(--dim); font-size: 12px; margin-top: 6px; }
+  kbd { background: var(--field); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; font: 11px Consolas, monospace; }
+</style>
+</head>
+<body>
+<main id="stage">
+  <div id="hint"></div>
+  <div id="viewbar"><span id="viewLabel"></span><button id="bUndo" title="Undo (Ctrl+Z)">↶</button><button id="bRedo" title="Redo (Ctrl+Y)">↷</button><button id="bFit">Fit</button><button id="b100">100%</button><button id="bCropView" title="Show only the cropped area">Crop preview</button><button id="bEdges" title="Brighten the view hard to see where the frame starts. Display only; saved files are not affected. Key: E">Find edges</button><span id="zoomPct"></span></div>
+  <div id="zoomWrap"><div id="zoomInner"><img id="zoomImg" alt="" draggable="false"><div id="zclip"><div id="zcrop" class="crop">
+      <i class="h" data-h="n"></i><i class="h" data-h="s"></i><i class="h" data-h="w"></i><i class="h" data-h="e"></i>
+      <i class="h" data-h="nw"></i><i class="h" data-h="ne"></i><i class="h" data-h="se"></i><i class="h" data-h="sw"></i>
+    </div></div></div></div>
+  <div id="empty">No preview yet.<br>Load a frame and press <b>Preview</b> (<kbd>P</kbd>).</div>
+  <div id="frame" hidden>
+    <img id="img" alt="preview" draggable="false">
+    <div id="clip"><div id="crop" class="crop">
+      <i class="h" data-h="n"></i><i class="h" data-h="s"></i><i class="h" data-h="w"></i><i class="h" data-h="e"></i>
+      <i class="h" data-h="nw"></i><i class="h" data-h="ne"></i><i class="h" data-h="se"></i><i class="h" data-h="sw"></i>
+    </div></div>
+  </div>
+  <div id="dock">
+    <div id="bar"><span id="msg"></span><div id="prog"><i></i></div></div>
+    <div id="tools">
+      <div class="tg" title="Rotate and flip">
+        <button id="bRotL" title="Rotate left">⟲</button><button id="bRotR" title="Rotate right">⟳</button><button id="bFlipH" title="Flip left-right">↔</button><button id="bFlipV" title="Flip top-bottom">↕</button>
+      </div>
+      <div class="tg" title="Straighten"><span class="tl">Straighten</span><input type="range" id="angle" min="-5" max="5" step="0.05"><output></output></div>
+      <div class="tg">
+        <button id="bCropReset">Full frame</button><button id="bAutoCrop" title="Fit the crop box to the detected edges now">Auto crop</button><button id="bAutoAngle" title="Level the frame using the edges of the film holder, then crop">Auto straighten</button><button id="bAutoFit" title="After every preview, fit the crop box to the detected edges. You can still drag the edges afterwards."></button>
+      </div>
+      <div class="tg main">
+        <button id="bCancel" hidden>Cancel scan</button><button id="bPreview">Preview</button><button id="bScan" class="primary">Scan</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<aside id="panel">
+  <div id="status"><i id="dot"></i><span id="smsg">checking scanner…</span></div>
+  <h2>Scan settings</h2>
+  <div class="row"><label>Film type</label>
+    <select id="film"><option value="neg">Colour negative</option><option value="bw">Black &amp; white negative</option><option value="slide">Colour slide</option><option value="bwslide">Black &amp; white slide</option></select></div>
+  <div class="row"><label>Resolution</label>
+    <select id="dpi"><option>900</option><option>1200</option><option>1800</option><option>2400</option><option>3600</option><option>7200</option></select>
+    <span class="note" style="margin:0">dpi</span></div>
+  <div class="row"><label>Preview</label>
+    <select id="pdpi"><option>300</option><option>600</option><option>900</option><option>1200</option><option>1800</option></select>
+    <span class="note" style="margin:0">dpi</span></div>
+  <div class="row"><label>Save as</label>
+    <select id="fmt"><option value="tiff16">TIFF 48-bit (16 per channel)</option><option value="tiff8">TIFF 24-bit (8 per channel)</option><option value="jpeg">JPEG 24-bit</option></select></div>
+  <div class="row"><label>Colour space</label>
+    <select id="cspace"><option value="srgb">sRGB</option><option value="adobe">Adobe RGB (1998)</option><option value="prophoto">ProPhoto RGB</option></select></div>
+  <div class="row"><label>Passes</label>
+    <select id="samples"><option value="1">1 (normal)</option><option value="2">2 averaged</option><option value="4">4 averaged</option><option value="8">8 averaged</option></select></div>
+  <div class="row"><label>Multi-exposure</label>
+    <select id="mexp" title="Adds a longer-exposure pass and merges it in: cleaner detail where the film is dense. Needs 900 dpi or more."><option value="0">Off</option><option value="2">On, 2× long pass</option><option value="4">On, 4× long pass</option></select></div>
+  <h2>Clean-up</h2>
+  <div class="row"><label>Infrared clean</label><div class="seg" id="segIR"></div></div>
+  <p class="note" id="bwNote" hidden>Off for black &amp; white: silver film blocks infrared, so cleaning would damage the picture. Scans take half the time.</p>
+
+  <div class="row"><label>Sharpen</label><div class="seg" id="segSharpen"></div></div>
+  <div class="row"><label>Grain reduce</label><div class="seg" id="segGrain"></div></div>
+
+  <h2>Film base</h2>
+  <div class="row"><i id="swatch"></i><span id="baseTxt" style="flex:1;color:var(--dim)"></span><button id="bLock"></button></div>
+  <div class="btns"><button id="bBaseAuto">Measure from frame</button><button id="bBasePick">Pick on image</button></div>
+  <p class="note">Measured once and held for the whole roll, so colour cannot drift between frames.</p>
+
+  <h2>Tone</h2>
+  <canvas id="hist" width="300" height="64"></canvas>
+  <div class="row"><label>Exposure</label><input type="range" id="exposure" min="-4" max="6" step="0.05"><output></output></div>
+  <div class="row"><label>Contrast</label><input type="range" id="contrast" min="0" max="1" step="0.01"><output></output></div>
+  <div class="row"><label>White point</label><input type="range" id="white" min="0.2" max="2" step="0.01"><output></output></div>
+  <div class="row"><label>Black point</label><input type="range" id="black" min="0" max="0.2" step="0.002"><output></output></div>
+  <div class="row"><label>Shadows</label><input type="range" id="shadows" min="-1" max="1" step="0.02"><output></output></div>
+  <div class="row"><label>Highlights</label><input type="range" id="highlights" min="-1" max="1" step="0.02"><output></output></div>
+  <div class="row"><label>Film gamma</label><input type="range" id="gamma" min="0.8" max="2.6" step="0.02"><output></output></div>
+  <div id="curveBox" hidden>
+    <div class="seg"><button data-ch="rgb">All</button><button data-ch="r">Red</button><button data-ch="g">Green</button><button data-ch="b">Blue</button><button id="bCurveReset" title="Straighten the curve shown. Shift-click: all four.">Reset</button></div>
+    <canvas id="curve" width="600" height="400"></canvas>
+    <p class="note">Click to add a point, drag to shape, double-click a point to remove it.</p>
+  </div>
+  <div class="btns"><button id="bAutoExp">Auto exposure</button><button id="bAutoExpMode"></button></div>
+
+  <div class="btns" style="margin-top:8px"><button id="bResetColor">Reset tone and colour</button></div>
+  <div id="colourSec"><h2>Colour</h2>
+  <div class="row"><label>Warmth</label><input type="range" id="temp" min="-1.5" max="1.5" step="0.01"><output></output></div>
+  <div class="row"><label>Tint</label><input type="range" id="tint" min="-1.5" max="1.5" step="0.01"><output></output></div>
+  <div class="row"><label>Saturation</label><input type="range" id="saturation" min="0" max="2" step="0.01"><output></output></div>
+  <div class="btns"><button id="bNeutral">Pick neutral</button><button id="bRestore" title="Rebalance the three colour layers of faded film">Restore fading</button></div></div>
+
+  <h2>Presets</h2>
+  <div class="row"><select id="preset"></select><button id="bPresetApply">Apply</button></div>
+  <div class="row"><input type="text" id="presetName" placeholder="Name, e.g. Portra 400 roll 3" spellcheck="false"><button id="bPresetSave">Save</button><button id="bPresetDel" title="Delete the selected preset">✕</button></div>
+  <p class="note">Ctrl + scroll here to step through presets; each one is applied as you stop on it. Looks change tone only; presets you save also keep film base and colour balance.</p>
+
+  <h2>Output</h2>
+  <div class="row"><input type="text" id="out_dir" spellcheck="false"></div>
+  <div class="btns" style="margin-bottom:6px"><button id="bRaw" title="Also save the untouched 16-bit sensor data (with infrared) next to each scan"></button></div>
+  <div class="btns" style="margin-bottom:6px"><button id="bReprocess" title="Write the scan file again with the current colour settings">Save over scan</button><button id="bSaveCrop" title="Save the area inside the box as its own file next to the scan">Save cropped copy</button><button id="bFolder">Open folder</button></div>
+  <div class="btns" style="margin-top:6px"><button id="bOpenRaw" title="Load a saved raw scan and develop it again with the current settings">Open raw scan…</button></div>
+  <div id="file"></div>
+  <p class="note" id="saveNote"></p>
+  <div class="btns" style="margin-top:12px"><button id="bQuit" title="Release the scanner and close the app">Quit</button></div>
+  <p class="note"><kbd>P</kbd> preview · <kbd>S</kbd> scan · scroll to zoom · drag to pan · double-click for 100% · <kbd>F</kbd> fit · <kbd>E</kbd> find edges · <kbd>Ctrl+Z</kbd> undo · <kbd>Ctrl+Y</kbd> redo · <kbd>Esc</kbd> cancel pick</p>
+</aside>
+
+<script>
+const $ = id => document.getElementById(id);
+const SLIDERS = ["exposure", "contrast", "white", "black", "shadows", "highlights", "gamma", "temp", "tint", "saturation", "angle"];
+let st = null, pickMode = null, shownVersion = -1, imgBusy = false, imgWanted = false, sendTimer = null, lastJob = 0;
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { say(j.error || ("request failed: " + r.status), true); throw new Error(j.error || r.status); }
+  return j;
+}
+function say(text, err) { const m = $("msg"); m.textContent = text || ""; m.classList.toggle("err", !!err); }
+
+/* ---- state -> UI ---- */
+/* ---- undo / redo ----
+   A snapshot is everything that changes how the picture looks or is framed. A burst of changes (dragging a slider,
+   moving a crop edge) becomes one step once it has been still for half a second. A new preview or scan starts a
+   fresh history, so undo never reaches back into another frame. */
+const undoStack = [], redoStack = [];
+let settled = null, beforeBurst = null, burstTimer = null;
+function snapOf(s) { return JSON.stringify({settings: s.settings, base_locked: s.base_locked, auto_exposure: s.auto_exposure}); }
+function showHistory() { $("bUndo").disabled = !undoStack.length; $("bRedo").disabled = !redoStack.length; }
+function clearHistory(s) { undoStack.length = redoStack.length = 0; clearTimeout(burstTimer); burstTimer = beforeBurst = null; settled = snapOf(s); showHistory(); }
+function trackHistory(s) {
+  const now = snapOf(s);
+  if (settled === null) { settled = now; showHistory(); return; }
+  if (now === settled && !burstTimer) return;
+  if (s.job.state === "running") { settled = now; return; }        // changes made by a running job are not steps
+  if (!burstTimer) beforeBurst = settled;
+  clearTimeout(burstTimer);
+  burstTimer = setTimeout(() => {
+    burstTimer = null;
+    const cur = snapOf(st);
+    if (cur !== beforeBurst) { undoStack.push(beforeBurst); if (undoStack.length > 200) undoStack.shift(); redoStack.length = 0; }
+    settled = cur; beforeBurst = null; showHistory();
+  }, 500);
+}
+async function stepHistory(from, to, word) {
+  if (burstTimer) {                                                 // finish the burst in progress first
+    clearTimeout(burstTimer); burstTimer = null;
+    const cur = snapOf(st); if (cur !== beforeBurst) { undoStack.push(beforeBurst); redoStack.length = 0; } settled = cur; beforeBurst = null;
+  }
+  if (!from.length) { say("Nothing to " + word); return; }
+  if (st.job.state === "running") { say("Wait for the scan to finish"); return; }
+  const target = from.pop(); to.push(settled); settled = target; showHistory();
+  try { apply(await api("/api/settings", JSON.parse(target)), false); say(word === "undo" ? "Undone" : "Redone"); }
+  catch (e) {}
+}
+const undo = () => stepHistory(undoStack, redoStack, "undo"), redo = () => stepHistory(redoStack, undoStack, "redo");
+
+function apply(s, fromUser) {
+  st = s;
+  trackHistory(s);
+  $("dot").classList.toggle("ok", s.scanner_ok);
+  $("smsg").textContent = s.scanner_ok ? "Scanner connected" : "Scanner: " + s.scanner_msg;
+  const busy = s.job.state === "running";
+  $("bPreview").disabled = $("bScan").disabled = busy;
+  $("bReprocess").disabled = $("bSaveCrop").disabled = busy || !s.has_full;
+  const scanning = busy && (s.job.kind === "scan" || s.job.kind === "preview");
+  $("bCancel").hidden = !scanning;
+  // while the scanner runs, the frame stays put: no crop, rotate, flip or straighten
+  $("frame").classList.toggle("locked", scanning); $("zoomWrap").classList.toggle("locked", scanning);
+  for (const id of ["bRotL", "bRotR", "bFlipH", "bFlipV", "bCropReset", "bAutoCrop", "bAutoAngle", "angle", "bBasePick", "bNeutral", "bBaseAuto", "bOpenRaw", "film", "bPresetApply"]) $(id).disabled = scanning;
+  // fitting to the holder and straightening belong to the preview; on a finished scan the box is the artistic crop
+  for (const id of ["angle", "bAutoCrop", "bAutoAngle"]) $(id).disabled = scanning || s.viewing === "scan";
+  $("bCropReset").textContent = s.viewing === "scan" ? "Whole scan" : "Full frame";
+  if (scanning && pickMode) setPick(null);
+  $("prog").style.visibility = busy ? "visible" : "hidden";
+  $("prog").firstElementChild.style.width = Math.round(s.job.progress * 100) + "%";
+  if (busy) say(s.job.message);
+  else if (s.job.id !== lastJob) {
+    // a preview just finished: fit the crop box to the detected edges (not on page load, so a reload keeps your crop)
+    if (jobsSeen && autoFit && s.job.kind === "preview" && s.job.state === "done") api("/api/auto", {what: "crop"}).then(apply).catch(() => {});
+    lastJob = s.job.id;
+    if (s.job.state === "error") say(s.job.error, true); else if (s.job.state === "done" || s.job.state === "cancelled") say(s.job.message);
+  }
+  jobsSeen = true;
+  syncCurve(s);
+  if (!fromUser) {
+    for (const k of SLIDERS) if (document.activeElement !== $(k)) $(k).value = s.settings[k];
+    if (document.activeElement !== $("out_dir")) $("out_dir").value = s.out_dir;
+    $("dpi").value = s.scan_dpi; $("pdpi").value = s.preview_dpi; $("fmt").value = s.fmt; $("cspace").value = s.colorspace; $("samples").value = s.samples; $("mexp").value = s.multi_exposure; $("film").value = s.settings.mono ? (s.settings.negative ? "bw" : "bwslide") : (s.settings.negative ? "neg" : "slide");
+  }
+  for (const k of SLIDERS) $(k).nextElementSibling.textContent = (+$(k).value).toFixed(2);
+  const mono = s.settings.mono, irOn = s.infrared && !mono;
+  $("bwNote").hidden = !mono; ($("colourSec").closest("details") || $("colourSec")).hidden = mono; $("cspace").disabled = mono;
+  markSeg("segIR", irOn ? nearest(PRESETS.ir, s.settings.dust_threshold, "t") : 0, mono);
+  markSeg("segSharpen", nearest(PRESETS.sharpen, s.settings.sharpen, "v"));
+  markSeg("segGrain", nearest(PRESETS.grain, s.settings.grain, "v"));
+  $("bRaw").classList.toggle("on", s.save_raw); $("bRaw").textContent = s.save_raw ? "Also save raw file: on" : "Also save raw file: off";
+  $("bFlipH").classList.toggle("on", s.settings.flip_h); $("bFlipV").classList.toggle("on", s.settings.flip_v);
+  $("bLock").textContent = s.base_locked ? "Held ✓" : "Not held"; $("bLock").classList.toggle("on", s.base_locked);
+  $("bAutoExpMode").textContent = s.auto_exposure ? "On each preview: on" : "On each preview: off";
+  $("bAutoExpMode").classList.toggle("on", s.auto_exposure);
+  const b = s.settings.base, mx = Math.max(...b);
+  $("swatch").style.background = `rgb(${b.map(v => Math.round(255 * Math.pow(v / mx, 1 / 2.2))).join(",")})`;
+  $("baseTxt").textContent = b.map(v => Math.round(v)).join(" / ");
+  $("bSaveCrop").textContent = "Save cropped copy";
+  $("saveNote").textContent = s.crop_on_scan
+    ? "On a preview the box is the film crop: the scan is saved cut to it. After scanning, the box is a second crop on the scan: Save cropped copy writes that as its own file. Save over scan rewrites the scan with your colour changes."
+    : "Close and reopen the app to finish an update.";
+  $("file").textContent = (s.last_file ? "Scan: " + s.last_file : "") + (s.last_crop ? "\nCropped copy: " + s.last_crop : ""); $("file").style.whiteSpace = "pre-line";
+  const srcKey = s.viewing + ":" + (s.src_size || []).join("x") + ":" + s.settings.rotate;
+  if (srcKey !== lastSrcKey) { if (lastSrcKey) clearHistory(s); lastSrcKey = srcKey; view = null; }             // new picture: back to the whole frame
+  if (!s.has_preview) view = null;
+  $("empty").hidden = s.has_preview; $("frame").hidden = !s.has_preview || !!view;
+  $("zoomWrap").style.display = s.has_preview && view ? "block" : "none"; $("viewbar").style.display = s.has_preview ? "flex" : "none";
+  $("viewLabel").innerHTML = s.viewing === "scan" ? `<b>Scan</b> · ${s.full_dpi} dpi · ${s.src_size[0]}×${s.src_size[1]}` : `<b>Preview</b> · ${s.preview_dpi} dpi`;
+  $("bFit").classList.toggle("on", !view); $("bCropView").classList.toggle("on", !!(view && view.crop));
+  $("zoomPct").textContent = view && lastK ? Math.round(lastK * 100) + "%" : "";
+  if (s.has_preview && s.version !== shownVersion && !imgBusy) refreshImage();
+  placeCrop();
+}
+
+let boost = false;
+let pending = null, histTimer = null, view = null, lastSrcKey = "", lastRect = null, lastK = 0, viewTimer = null;
+/* view = null: whole frame with the crop box.
+   view = {k, cx, cy}: zoomed. k = screen pixels per image pixel; (cx, cy) = the point of the frame at the centre of the
+   viewport, as fractions. The loaded picture covers `lastRect` (plus a margin around the viewport) and is positioned and
+   scaled with CSS on every wheel / drag event, so motion is immediate; a sharper piece is fetched once it settles. */
+function dockH() { return $("dock").offsetHeight || 96; }
+function zoomBox() { const r = $("stage").getBoundingClientRect(); return {left: r.left + 20, top: r.top + 44, w: Math.max(50, r.width - 40), h: Math.max(50, r.height - 44 - dockH() - 24)}; }
+function fitK() { const [W, H] = st.src_size, b = zoomBox(); return Math.min(b.w / W, b.h / H); }
+function viewport() {                      // visible region in image pixels (may reach outside the image)
+  const [W, H] = st.src_size, b = zoomBox();
+  return {x: view.cx * W - b.w / (2 * view.k), y: view.cy * H - b.h / (2 * view.k), w: b.w / view.k, h: b.h / view.k};
+}
+function wantedRect() {                    // what to load: the viewport plus a margin, clipped to the image
+  const [W, H] = st.src_size, v = viewport(), m = 0.4;
+  const xa = Math.max(0, v.x - v.w * m), ya = Math.max(0, v.y - v.h * m), xb = Math.min(W, v.x + v.w * (1 + m)), yb = Math.min(H, v.y + v.h * (1 + m));
+  if (xb - xa < 2 || yb - ya < 2) return null;
+  let f = Math.min(1, view.k); f = Math.min(f, 3000 / Math.max((xb - xa) * f, (yb - ya) * f, 1) * f);
+  return {x0: xa / W, y0: ya / H, x1: xb / W, y1: yb / H, f};
+}
+function layout() {                        // place the loaded picture for the current view; no network
+  if (!view || !lastRect) return;
+  const [W, H] = st.src_size, v = viewport(), s = $("zoomInner").style;
+  s.left = (lastRect.x0 * W - v.x) * view.k + "px"; s.top = (lastRect.y0 * H - v.y) * view.k + "px";
+  s.width = (lastRect.x1 - lastRect.x0) * W * view.k + "px"; s.height = (lastRect.y1 - lastRect.y0) * H * view.k + "px";
+  $("zoomImg").classList.toggle("px", view.k > 2);
+  lastK = view.k; $("zoomPct").textContent = Math.round(view.k * 100) + "%";
+  placeCrop();
+}
+function covered() {                       // does the loaded picture still serve the current view sharply?
+  if (!lastRect || lastRect.version !== shownVersion) return false;
+  const [W, H] = st.src_size, v = viewport(), e = 0.5;
+  const xa = Math.max(0, v.x), ya = Math.max(0, v.y), xb = Math.min(W, v.x + v.w), yb = Math.min(H, v.y + v.h);
+  return lastRect.x0 * W <= xa + e && lastRect.y0 * H <= ya + e && lastRect.x1 * W >= xb - e && lastRect.y1 * H >= yb - e
+      && lastRect.f >= Math.min(1, view.k) * 0.8;
+}
+function settle(delay) { clearTimeout(viewTimer); viewTimer = setTimeout(() => { if (view && !covered()) refreshImage(); }, delay === undefined ? 90 : delay); }
+async function showBlob(blob, version, rect) {
+  const url = URL.createObjectURL(blob), el = rect ? $("zoomImg") : $("img"), old = el.src;
+  if (rect) {
+    const probe = new Image(); probe.src = url;
+    try { await probe.decode(); } catch (e) {}
+    if (!view) { URL.revokeObjectURL(url); return; }
+    el.src = url; rect.version = version; lastRect = rect; layout();
+  } else el.src = url;
+  if (old.startsWith("blob:")) setTimeout(() => URL.revokeObjectURL(old), 800);
+  shownVersion = version; clearTimeout(histTimer); histTimer = setTimeout(drawHist, 180);
+}
+/* Fetch the picture; if a settings patch is given it rides along in the same request.
+   Only one request is in flight; while it runs, newer patches and view changes are merged and sent next. */
+async function refreshImage(patch) {
+  if (patch) { pending = pending || {}; Object.assign(pending, patch, {settings: Object.assign({}, (pending.settings || {}), (patch.settings || {}))}); }
+  if (imgBusy) { imgWanted = true; return; }
+  imgBusy = true;
+  try {
+    do {
+      imgWanted = false;
+      const body = pending; pending = null;
+      let url = "/api/image?t=" + Date.now() + (boost ? "&boost=1" : ""), rect = null;
+      if (view && st && st.src_size) {
+        rect = wantedRect();
+        if (rect) {
+          const [W, H] = st.src_size;
+          url = `/api/view?x0=${rect.x0}&y0=${rect.y0}&x1=${rect.x1}&y1=${rect.y1}&w=${Math.ceil((rect.x1 - rect.x0) * W * rect.f)}&h=${Math.ceil((rect.y1 - rect.y0) * H * rect.f)}&t=${Date.now()}${boost ? "&boost=1" : ""}`;
+        }
+      }
+      const r = await fetch(url, body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
+      if (r.status === 200) await showBlob(await r.blob(), +r.headers.get("X-Version"), rect);
+    } while (imgWanted || pending);
+  } finally { imgBusy = false; }
+}
+function setView(v) {
+  const entering = v && !view;
+  view = v;
+  if (view) { view.cx = Math.min(1, Math.max(0, view.cx)); view.cy = Math.min(1, Math.max(0, view.cy)); }
+  $("frame").hidden = !st.has_preview || !!view; $("zoomWrap").style.display = view ? "block" : "none";
+  $("bFit").classList.toggle("on", !view); $("bCropView").classList.toggle("on", !!(view && view.crop));
+  $("zcrop").classList.toggle("solid", !!(view && view.crop));
+  if (!view) { $("zoomPct").textContent = ""; lastRect = null; placeCrop(); refreshImage(); return; }
+  if (entering || !lastRect) {             // start from the whole-frame picture already on screen, sharpen right after
+    $("zoomImg").src = $("img").src; lastRect = {x0: 0, y0: 0, x1: 1, y1: 1, f: 0, version: -1};
+  }
+  layout(); settle(0);
+}
+/* point of the frame (fractions) under a screen position */
+function frameAt(clientX, clientY) {
+  if (view) { const [W, H] = st.src_size, b = zoomBox(), v = viewport();
+    return {x: (v.x + (clientX - b.left) / view.k) / W, y: (v.y + (clientY - b.top) / view.k) / H}; }
+  const r = $("img").getBoundingClientRect(); return {x: (r.left === r.right) ? 0.5 : (clientX - r.left) / r.width, y: (clientY - r.top) / r.height};
+}
+function zoomAbout(clientX, clientY, k) {
+  const [W, H] = st.src_size, b = zoomBox(), p = frameAt(clientX, clientY);
+  k = Math.min(8, k);
+  if (k < fitK() * 0.999) { if (view) setView(null); return; }
+  // keep the point under the cursor where it is
+  const dx = clientX - (b.left + b.w / 2), dy = clientY - (b.top + b.h / 2);
+  setView({k, cx: p.x - dx / (k * W), cy: p.y - dy / (k * H)});
+}
+$("stage").addEventListener("wheel", e => {
+  if (!st || !st.has_preview || pickMode) return;
+  e.preventDefault();
+  const cur = view ? view.k : fitK(), step = Math.pow(1.0018, -e.deltaY * (e.deltaMode === 1 ? 33 : 1));
+  if (!view && step <= 1) return;          // already showing the whole frame
+  zoomAbout(e.clientX, e.clientY, cur * step);
+}, {passive: false});
+$("stage").addEventListener("dblclick", e => {
+  if (!st || !st.has_preview || pickMode || e.target.classList.contains("h")) return;
+  if (view) setView(null); else zoomAbout(e.clientX, e.clientY, fitK() * 2.5);
+});
+let drag = null;
+$("zoomWrap").addEventListener("pointerdown", e => {
+  if (!view || e.target.classList.contains("h") || e.button !== 0) return;
+  if (view.crop) { view = {k: view.k, cx: view.cx, cy: view.cy}; $("zcrop").classList.remove("solid"); $("bCropView").classList.remove("on"); }
+  drag = {sx: e.clientX, sy: e.clientY, cx: view.cx, cy: view.cy};
+  try { $("zoomWrap").setPointerCapture(e.pointerId); } catch (err) {} $("zoomWrap").classList.add("drag"); e.preventDefault();
+});
+$("zoomWrap").addEventListener("pointermove", e => {
+  if (!drag || !view) return;
+  const [W, H] = st.src_size;
+  view.cx = Math.min(1, Math.max(0, drag.cx - (e.clientX - drag.sx) / (view.k * W)));
+  view.cy = Math.min(1, Math.max(0, drag.cy - (e.clientY - drag.sy) / (view.k * H)));
+  layout(); settle();
+});
+const endDrag = () => { drag = null; $("zoomWrap").classList.remove("drag"); };
+$("zoomWrap").addEventListener("pointerup", endDrag); $("zoomWrap").addEventListener("pointercancel", endDrag);
+$("bFit").onclick = () => setView(null);
+$("bUndo").onclick = undo; $("bRedo").onclick = redo;
+function setBoost(on) { boost = on; $("bEdges").classList.toggle("on", on); refreshImage(); }
+$("bEdges").onclick = () => setBoost(!boost);
+$("b100").onclick = () => { const b = zoomBox(); zoomAbout(b.left + b.w / 2, b.top + b.h / 2, 1); };
+$("bCropView").onclick = () => {
+  if (view && view.crop) { setView(null); return; }
+  const [W, H] = st.src_size, b = zoomBox(), [x0, y0, x1, y1] = st.settings.crop;
+  setView({crop: true, k: Math.min(b.w / ((x1 - x0) * W), b.h / ((y1 - y0) * H)) * 0.98, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2});
+};
+window.addEventListener("resize", () => { if (st && st.has_preview && view) { layout(); settle(); } });
+async function drawHist() {
+  const h = await (await fetch("/api/histogram")).json(); if (!h) return;
+  const c = $("hist"), g = c.getContext("2d"); g.clearRect(0, 0, c.width, c.height); g.globalCompositeOperation = "lighter";
+  const mx = Math.max(...["r", "g", "b"].flatMap(k => h[k].slice(1, 63))) || 1;
+  for (const [k, col] of [["r", "#d9483b"], ["g", "#4caf50"], ["b", "#3f7fe0"]]) {
+    g.fillStyle = col; g.beginPath(); g.moveTo(0, c.height);
+    h[k].forEach((v, i) => g.lineTo(i / 63 * c.width, c.height - Math.min(1, v / mx) * (c.height - 2)));
+    g.lineTo(c.width, c.height); g.fill();
+  }
+}
+
+/* ---- sending changes ---- */
+function push(body, now) {
+  clearTimeout(sendTimer);
+  const go = async () => apply(await api("/api/settings", body), true);
+  if (now) go(); else sendTimer = setTimeout(go, 45);
+}
+for (const k of SLIDERS) $(k).addEventListener("input", () => {
+  const v = +$(k).value;
+  $(k).nextElementSibling.textContent = v.toFixed(2);
+  if (st) { st.settings[k] = v; if (k === "exposure") st.auto_exposure = false; }
+  refreshImage({settings: {[k]: v}, ...(k === "exposure" ? {auto_exposure: false} : {})});
+});
+for (const k of SLIDERS) $(k).addEventListener("dblclick", async () => {       // double-click resets one slider
+  const d = {shadows: 0, highlights: 0, angle: 0, white: 1, exposure: 0, contrast: 0.25, black: 0, gamma: 1.6, temp: 0, tint: 0, saturation: 1}[k];
+  $(k).value = d; push({settings: {[k]: d}}, true);
+});
+$("dpi").onchange = () => push({scan_dpi: +$("dpi").value}, true);
+$("pdpi").onchange = () => push({preview_dpi: +$("pdpi").value}, true);
+$("bRaw").onclick = () => push({save_raw: !st.save_raw}, true);
+$("fmt").onchange = () => push({fmt: $("fmt").value}, true);
+$("film").onchange = () => { const v = $("film").value; push({settings: {negative: v === "neg" || v === "bw", mono: v === "bw" || v === "bwslide"}}, true); };
+$("out_dir").onchange = () => push({out_dir: $("out_dir").value.trim()}, true);
+/* Off / Light / Medium / Heavy presets */
+const LEVELS = ["Off", "Light", "Medium", "Heavy"];
+const PRESETS = {
+  ir: [null, {t: 0.12, g: 1.5}, {t: 0.07, g: 2.5}, {t: 0.04, g: 4.0}],
+  sharpen: [{v: 0}, {v: 0.3}, {v: 0.6}, {v: 1.0}],
+  grain: [{v: 0}, {v: 0.3}, {v: 0.6}, {v: 1.0}],
+};
+function nearest(list, val, key) {
+  let best = 0, bd = 1e9;
+  list.forEach((p, i) => { if (p && Math.abs(p[key] - val) < bd) { bd = Math.abs(p[key] - val); best = i; } });
+  return best;
+}
+function markSeg(id, idx, disabled) { [...$(id).children].forEach((b, i) => { b.classList.toggle("on", i === idx); b.disabled = !!disabled; }); }
+function buildSeg(id, onPick) { LEVELS.forEach((name, i) => { const b = document.createElement("button"); b.textContent = name; b.onclick = () => onPick(i); $(id).appendChild(b); }); }
+buildSeg("segIR", i => push(i === 0 ? {infrared: false} : {infrared: true, settings: {dust: true, dust_threshold: PRESETS.ir[i].t, dust_grow: PRESETS.ir[i].g}}, true));
+buildSeg("segSharpen", i => push({settings: {sharpen: PRESETS.sharpen[i].v}}, true));
+buildSeg("segGrain", i => push({settings: {grain: PRESETS.grain[i].v}}, true));
+$("bLock").onclick = () => push({base_locked: !st.base_locked}, true);
+$("bAutoExpMode").onclick = () => push({auto_exposure: !st.auto_exposure}, true);
+$("bFlipH").onclick = () => push({settings: {flip_h: !st.settings.flip_h, crop: [0, 0, 1, 1]}}, true);
+$("bFlipV").onclick = () => push({settings: {flip_v: !st.settings.flip_v, crop: [0, 0, 1, 1]}}, true);
+$("bRotL").onclick = () => push({settings: {rotate: (st.settings.rotate + 3) % 4, crop: [0, 0, 1, 1]}}, true);
+$("bRotR").onclick = () => push({settings: {rotate: (st.settings.rotate + 1) % 4, crop: [0, 0, 1, 1]}}, true);
+$("bCropReset").onclick = () => push({settings: {crop: [0, 0, 1, 1]}}, true);
+$("cspace").onchange = () => push({colorspace: $("cspace").value}, true);
+$("samples").onchange = () => push({samples: +$("samples").value}, true);
+$("mexp").onchange = () => push({multi_exposure: +$("mexp").value}, true);
+let autoFit = true, jobsSeen = false;
+try { autoFit = localStorage.getItem("autoFit") !== "0"; } catch (e) {}
+function showAutoFit() { $("bAutoFit").textContent = autoFit ? "Auto-fit: on" : "Auto-fit: off"; $("bAutoFit").classList.toggle("on", autoFit); }
+$("bAutoFit").onclick = () => { autoFit = !autoFit; try { localStorage.setItem("autoFit", autoFit ? "1" : "0"); } catch (e) {} showAutoFit(); };
+showAutoFit();
+const auto = what => async () => { try { apply(await api("/api/auto", {what})); } catch (e) {} };
+$("bAutoCrop").onclick = auto("crop"); $("bAutoAngle").onclick = auto("angle"); $("bRestore").onclick = auto("restore");
+$("bOpenRaw").onclick = async () => { say("Opening…"); try { apply(await api("/api/open_raw", {})); say(""); } catch (e) {} };
+
+/* presets */
+function fillPresets(p) {
+  const sel = $("preset"), keep = sel.value; sel.innerHTML = "";
+  const group = (label, names) => { if (!names.length) return; const g = document.createElement("optgroup"); g.label = label;
+    names.forEach(n => { const o = document.createElement("option"); o.value = o.textContent = n; g.appendChild(o); }); sel.appendChild(g); };
+  group("Your presets", p.user); group("Looks", p.builtin);
+  if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+}
+async function presetCall(action, name) {
+  try { const p = await api("/api/presets", {action, name}); fillPresets(p); apply(p.state); return true; } catch (e) { return false; }
+}
+$("bPresetApply").onclick = () => { if ($("preset").value) presetCall("apply", $("preset").value); };
+$("bPresetSave").onclick = async () => { const n = $("presetName").value.trim() || $("preset").value;
+  if (await presetCall("save", n)) { $("preset").value = n; $("presetName").value = ""; say("Preset saved: " + n); } };
+$("bPresetDel").onclick = async () => { const n = $("preset").value; if (n && await presetCall("delete", n)) say("Preset deleted: " + n); };
+fetch("/api/presets").then(r => r.json()).then(fillPresets);
+
+
+$("bBaseAuto").onclick = async () => apply(await api("/api/auto", {what: "base"}));
+$("bAutoExp").onclick = async () => apply(await api("/api/auto", {what: "exposure"}));
+$("bResetColor").onclick = async () => apply(await api("/api/auto", {what: "reset_color"}));
+$("bFolder").onclick = () => api("/api/open_folder", {});
+$("bCancel").onclick = async () => { try { apply(await api("/api/cancel", {})); } catch (e) {} };
+$("bQuit").onclick = async () => { try { await api("/api/quit", {}); say("App closed. Scanner released."); setTimeout(() => window.close(), 300); } catch (e) {} };
+const job = kind => async () => { try { apply(await api("/api/job", {kind})); } catch (e) {} };
+$("bPreview").onclick = job("preview"); $("bScan").onclick = job("scan"); $("bReprocess").onclick = job("reprocess"); $("bSaveCrop").onclick = job("save_crop");
+
+/* ---- picking ---- */
+function setPick(mode) {
+  if (mode && view) setView(null);
+  pickMode = mode; $("frame").classList.toggle("pick", !!mode);
+  $("bBasePick").classList.toggle("on", mode === "base"); $("bNeutral").classList.toggle("on", mode === "neutral");
+  $("hint").style.display = mode ? "block" : "none";
+  $("hint").textContent = mode === "base" ? "Click clear, unexposed film (edge between frames)"
+    : mode === "loupe" ? "Click the spot you want to inspect at 100%" : "Click something that should be grey or white";
+}
+$("bBasePick").onclick = () => setPick(pickMode === "base" ? null : "base");
+$("bNeutral").onclick = () => setPick(pickMode === "neutral" ? null : "neutral");
+$("frame").addEventListener("click", async e => {
+  if (!pickMode) return;
+  const r = $("img").getBoundingClientRect(), mode = pickMode; setPick(null);
+  const px = (e.clientX - r.left) / r.width, py = (e.clientY - r.top) / r.height;
+  try { apply(await api("/api/pick", {mode, x: px, y: py})); } catch (err) {}
+}, true);
+
+/* ---- curve editor ----
+   One curve for all channels plus one each for red, green and blue. Input (left to right) is the tone before the
+   curve, output (bottom to top) the tone after. The same smooth, never-overshooting interpolation runs on the server. */
+let curves = {}, curveCh = "rgb", curveDrag = null;
+const CURVE_COL = {rgb: "#e8e6e3", r: "#e5604d", g: "#6fbf73", b: "#5b9cf0"};
+const curvePts = ch => (curves[ch] && curves[ch].length >= 2 ? curves[ch] : [[0, 0], [1, 1]]);
+function curveFn(p) {
+  const n = p.length, h = [], d = [], m = new Array(n);
+  for (let i = 0; i < n - 1; i++) { h.push(p[i + 1][0] - p[i][0]); d.push((p[i + 1][1] - p[i][1]) / h[i]); }
+  m[0] = d[0]; m[n - 1] = d[n - 2];
+  for (let i = 1; i < n - 1; i++) m[i] = d[i - 1] * d[i] > 0 ? 2 * d[i - 1] * d[i] / (d[i - 1] + d[i]) : 0;
+  return x => {
+    if (x <= p[0][0]) return p[0][1]; if (x >= p[n - 1][0]) return p[n - 1][1];
+    let i = 0; while (i < n - 2 && x > p[i + 1][0]) i++;
+    const t = (x - p[i][0]) / h[i], t2 = t * t, t3 = t2 * t;
+    return Math.min(1, Math.max(0, (2 * t3 - 3 * t2 + 1) * p[i][1] + (t3 - 2 * t2 + t) * h[i] * m[i] + (-2 * t3 + 3 * t2) * p[i + 1][1] + (t3 - t2) * h[i] * m[i + 1]));
+  };
+}
+function drawCurve() {
+  const c = $("curve"), g = c.getContext("2d"), W = c.width, H = c.height, pad = 14, X = x => pad + x * (W - 2 * pad), Y = y => H - pad - y * (H - 2 * pad);
+  g.clearRect(0, 0, W, H); g.lineWidth = 1; g.strokeStyle = "#262628";
+  for (let i = 0; i <= 4; i++) { g.beginPath(); g.moveTo(X(i / 4), Y(0)); g.lineTo(X(i / 4), Y(1)); g.moveTo(X(0), Y(i / 4)); g.lineTo(X(1), Y(i / 4)); g.stroke(); }
+  g.strokeStyle = "#3a3a3d"; g.beginPath(); g.moveTo(X(0), Y(0)); g.lineTo(X(1), Y(1)); g.stroke();
+  for (const ch of ["r", "g", "b", "rgb"]) {                       // the other curves faintly, the active one on top
+    if (ch === curveCh) continue;
+    const p = curvePts(ch); if (p.length === 2 && p[0][0] === 0 && p[0][1] === 0 && p[1][0] === 1 && p[1][1] === 1) continue;
+    const f = curveFn(p); g.globalAlpha = 0.35; g.strokeStyle = CURVE_COL[ch]; g.lineWidth = 2; g.beginPath();
+    for (let i = 0; i <= 120; i++) { const x = i / 120; i ? g.lineTo(X(x), Y(f(x))) : g.moveTo(X(x), Y(f(x))); } g.stroke(); g.globalAlpha = 1;
+  }
+  const p = curvePts(curveCh), f = curveFn(p);
+  g.strokeStyle = CURVE_COL[curveCh]; g.lineWidth = 3; g.beginPath();
+  for (let i = 0; i <= 200; i++) { const x = i / 200; i ? g.lineTo(X(x), Y(f(x))) : g.moveTo(X(x), Y(f(x))); } g.stroke();
+  g.fillStyle = CURVE_COL[curveCh];
+  for (const [x, y] of p) { g.beginPath(); g.arc(X(x), Y(y), 7, 0, 6.3); g.fill(); g.strokeStyle = "#0c0c0c"; g.lineWidth = 2; g.stroke(); }
+  for (const b of $("curveBox").querySelectorAll("[data-ch]")) b.classList.toggle("on", b.dataset.ch === curveCh);
+}
+function syncCurve(s) {
+  const has = s.settings.curve !== undefined;                      // older app versions have no curves
+  $("curveBox").hidden = !has; if (!has || curveDrag) return;
+  const next = JSON.stringify(s.settings.curve || {});
+  if (next !== JSON.stringify(curves)) { curves = JSON.parse(next); }
+  if (s.settings.mono && curveCh !== "rgb") curveCh = "rgb";
+  for (const b of $("curveBox").querySelectorAll("[data-ch]")) b.disabled = s.settings.mono && b.dataset.ch !== "rgb";
+  drawCurve();
+}
+function sendCurve() { if (st) st.settings.curve = JSON.parse(JSON.stringify(curves)); refreshImage({settings: {curve: curves}}); }
+function curvePos(e) {
+  const c = $("curve"), r = c.getBoundingClientRect(), pad = 14 * r.width / c.width;
+  return [Math.min(1, Math.max(0, (e.clientX - r.left - pad) / (r.width - 2 * pad))), Math.min(1, Math.max(0, 1 - (e.clientY - r.top - pad) / (r.height - 2 * pad))), r.width];
+}
+function curveHit(x, y, w) {
+  const p = curvePts(curveCh); let best = -1, bd = 1e9;
+  p.forEach((q, i) => { const d = Math.hypot((q[0] - x) * w, (q[1] - y) * w * 2 / 3); if (d < bd) { bd = d; best = i; } });
+  return bd < 13 ? best : -1;
+}
+$("curve").addEventListener("pointerdown", e => {
+  if (e.button !== 0) return;
+  const [x, y, w] = curvePos(e); let p = curvePts(curveCh).map(q => q.slice()), i = curveHit(x, y, w);
+  if (i < 0) { p.push([x, y]); p.sort((a, b) => a[0] - b[0]); i = p.findIndex(q => q[0] === x && q[1] === y); }
+  curves[curveCh] = p; curveDrag = {i};
+  try { $("curve").setPointerCapture(e.pointerId); } catch (err) {}
+  drawCurve(); sendCurve(); e.preventDefault();
+});
+$("curve").addEventListener("pointermove", e => {
+  if (!curveDrag) return;
+  const [x, y] = curvePos(e), p = curves[curveCh], i = curveDrag.i, last = p.length - 1;
+  // end points keep their side; inner points stay between their neighbours
+  p[i] = [i === 0 ? 0 : i === last ? 1 : Math.min(p[i + 1][0] - 0.01, Math.max(p[i - 1][0] + 0.01, x)), y];
+  drawCurve(); sendCurve();
+});
+const curveUp = () => { curveDrag = null; };
+$("curve").addEventListener("pointerup", curveUp); $("curve").addEventListener("pointercancel", curveUp);
+$("curve").addEventListener("dblclick", e => {
+  const [x, y, w] = curvePos(e), p = curvePts(curveCh).map(q => q.slice()), i = curveHit(x, y, w);
+  if (i > 0 && i < p.length - 1) { p.splice(i, 1); curves[curveCh] = p; drawCurve(); sendCurve(); }
+});
+for (const b of $("curveBox").querySelectorAll("[data-ch]")) b.onclick = () => { curveCh = b.dataset.ch; drawCurve(); };
+$("bCurveReset").onclick = e => { if (e.shiftKey) curves = {}; else delete curves[curveCh]; drawCurve(); sendCurve(); };
+
+/* ---- crop box ---- */
+function setBox(el, c, r) {            // c: crop in frame fractions; r: the part of the frame the element's parent shows
+  const w = r.x1 - r.x0, hh = r.y1 - r.y0, s = el.style;
+  s.left = (c[0] - r.x0) / w * 100 + "%"; s.top = (c[1] - r.y0) / hh * 100 + "%";
+  s.width = (c[2] - c[0]) / w * 100 + "%"; s.height = (c[3] - c[1]) / hh * 100 + "%";
+}
+const WHOLE = {x0: 0, y0: 0, x1: 1, y1: 1};
+function placeCrop(c) {
+  if (!st || (dragging && !c)) return;
+  c = c || st.settings.crop;
+  setBox($("crop"), c, WHOLE);
+  $("zcrop").style.display = view && lastRect ? "" : "none";
+  if (view && lastRect) setBox($("zcrop"), c, lastRect);
+}
+let dragging = null;
+function cropDown(e, zoomed) {
+  if (pickMode || e.currentTarget.closest(".locked")) return;
+  const hd = e.target.dataset.h || (zoomed ? null : "move");
+  if (!hd) return;
+  // screen pixels per whole frame: how far the pointer must travel to cross it
+  let fw, fh;
+  if (zoomed) { fw = view.k * st.src_size[0]; fh = view.k * st.src_size[1]; }
+  else { const r = $("img").getBoundingClientRect(); fw = r.width; fh = r.height; }
+  dragging = {h: hd, sx: e.clientX, sy: e.clientY, c: [...st.settings.crop], w: fw, hgt: fh};
+  try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {} e.preventDefault(); e.stopPropagation();
+}
+function cropMove(e) {
+  if (!dragging) return;
+  const d = dragging, dx = (e.clientX - d.sx) / d.w, dy = (e.clientY - d.sy) / d.hgt; let [x0, y0, x1, y1] = d.c;
+  const cl = v => Math.min(1, Math.max(0, v)), MIN = 0.02;
+  if (d.h === "move") { const w = x1 - x0, hh = y1 - y0; x0 = Math.min(1 - w, Math.max(0, x0 + dx)); y0 = Math.min(1 - hh, Math.max(0, y0 + dy)); x1 = x0 + w; y1 = y0 + hh; }
+  else {
+    if (d.h.includes("w")) x0 = Math.min(cl(x0 + dx), x1 - MIN); if (d.h.includes("e")) x1 = Math.max(cl(x1 + dx), x0 + MIN);
+    if (d.h.includes("n")) y0 = Math.min(cl(y0 + dy), y1 - MIN); if (d.h.includes("s")) y1 = Math.max(cl(y1 + dy), y0 + MIN);
+  }
+  d.cur = [x0, y0, x1, y1]; placeCrop(d.cur);
+}
+function cropUp() {
+  const d = dragging; dragging = null;
+  if (d && d.cur) { st.settings.crop = d.cur; push({settings: {crop: d.cur.map(v => +v.toFixed(5))}}, true); }
+}
+for (const [id, zoomed] of [["crop", false], ["zcrop", true]]) {
+  $(id).addEventListener("pointerdown", e => cropDown(e, zoomed));
+  $(id).addEventListener("pointermove", cropMove);
+  $(id).addEventListener("pointerup", cropUp); $(id).addEventListener("pointercancel", cropUp);
+}
+
+/* ---- keys + polling ---- */
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" && e.target.type === "text") return;
+  if (e.key === "F5" || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r")) { e.preventDefault(); location.reload(); return; }
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "z") { e.preventDefault(); (e.shiftKey ? redo : undo)(); return; }
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;                  // leave other shortcuts (Ctrl+R, Ctrl+S ...) alone
+  if (e.key === "Escape") setPick(null);
+  else if (e.key.toLowerCase() === "f" && st && st.has_preview) setView(null);
+  else if (e.key.toLowerCase() === "e" && st && st.has_preview) setBoost(!boost);
+  else if (e.key.toLowerCase() === "p" && !$("bPreview").disabled) $("bPreview").click();
+  else if (e.key.toLowerCase() === "s" && !$("bScan").disabled) $("bScan").click();
+});
+/* Turn each heading and what follows it into a collapsible section; only the everyday ones start open. */
+(function sections() {
+  const open = {"Tone": 1, "Colour": 1};
+  let saved = {}; try { saved = JSON.parse(localStorage.getItem("sections") || "{}"); } catch (e) {}
+  const panel = $("panel"); let cur = null;
+  for (const el of [...panel.children]) {
+    let title = null;
+    if (el.tagName === "H2") title = el.textContent;
+    else if (el.id === "colourSec") { title = "Colour"; el.querySelector("h2").remove(); }
+    if (!title) { if (cur) cur.appendChild(el); continue; }
+    cur = document.createElement("details"); cur.className = "sec";
+    cur.open = title in saved ? !!saved[title] : !!open[title];
+    const sm = document.createElement("summary"); sm.textContent = title; cur.appendChild(sm);
+    const t = title; cur.addEventListener("toggle", function () { saved[t] = this.open ? 1 : 0; try { localStorage.setItem("sections", JSON.stringify(saved)); } catch (e) {} });
+    panel.insertBefore(cur, el);
+    if (el.tagName === "H2") el.remove(); else cur.appendChild(el);
+  }
+})();
+/* Self-check of the viewer, run only with ?selftest in the address (used by automated tests). */
+if (location.search.includes("selftest")) setTimeout(async () => {
+  const out = [], log = (k, v) => out.push(k + "=" + v), wait = ms => new Promise(r => setTimeout(r, ms));
+  try {
+    const b = zoomBox(), cx = b.left + b.w / 2, cy = b.top + b.h / 2;
+    const wheel = (dy, x, y) => $("stage").dispatchEvent(new WheelEvent("wheel", {deltaY: dy, clientX: x, clientY: y, bubbles: true, cancelable: true}));
+    const ptr = (el, t, x, y) => el.dispatchEvent(new PointerEvent(t, {clientX: x, clientY: y, button: 0, pointerId: 1, bubbles: true, cancelable: true}));
+    log("sections", document.querySelectorAll("details.sec").length + " open:" + [...document.querySelectorAll("details.sec[open] > summary")].map(s => s.textContent).join("|"));
+    log("fitK", fitK().toFixed(4));
+    const p0 = frameAt(cx + 150, cy - 80);
+    for (let i = 0; i < 6; i++) wheel(-100, cx + 150, cy - 80);
+    log("wheelIn_k", view ? (view.k / fitK()).toFixed(2) + "x fit" : "STILL FIT");
+    const p1 = frameAt(cx + 150, cy - 80); log("pointStays", Math.hypot(p1.x - p0.x, p1.y - p0.y).toFixed(4));
+    await wait(1500);
+    log("sharp", lastRect ? "f=" + lastRect.f.toFixed(2) + " covered=" + covered() + " busy=" + imgBusy + " imgNatural=" + $("zoomImg").naturalWidth : "none");
+    for (let i = 0; i < 20 && !covered(); i++) await wait(500);
+    log("sharpLater", "f=" + lastRect.f.toFixed(2) + " covered=" + covered() + " busy=" + imgBusy + " natural=" + $("zoomImg").naturalWidth + "x" + $("zoomImg").naturalHeight);
+    const c0 = view.cx; ptr($("zoomWrap"), "pointerdown", cx, cy); ptr($("zoomWrap"), "pointermove", cx - 240, cy + 60); ptr($("zoomWrap"), "pointerup", cx - 240, cy + 60);
+    log("pan_dx_px", ((view.cx - c0) * st.src_size[0] * view.k).toFixed(0));
+    ptr($("zoomWrap"), "pointerdown", cx, cy); ptr($("zoomWrap"), "pointermove", cx + 5000, cy); ptr($("zoomWrap"), "pointerup", cx + 5000, cy);
+    log("panPastEdge_cx", view.cx.toFixed(3) + " innerLeft=" + parseFloat($("zoomInner").style.left).toFixed(0));
+    const cr0 = st.settings.crop.slice(), hW = $("zcrop").querySelector('[data-h=w]');
+    ptr(hW, "pointerdown", 0, 0); ptr(hW, "pointermove", 36, 0); dragging && (dragging.keep = 1);
+    log("cropEdgeAtZoom_px", dragging && dragging.cur ? ((dragging.cur[0] - cr0[0]) * st.src_size[0] * view.k).toFixed(1) : "no drag");
+    dragging = null; placeCrop(cr0);
+    for (let i = 0; i < 20; i++) wheel(100, cx, cy);
+    log("wheelOut", view ? "STILL ZOOMED" : "fit");
+    wheel(-100, cx, cy); log("wheelInAgain", view ? "zoomed" : "STILL FIT");
+    $("stage").dispatchEvent(new MouseEvent("dblclick", {clientX: cx, clientY: cy, bubbles: true})); log("dblclick1", view ? "zoomed" : "fit");
+    $("stage").dispatchEvent(new MouseEvent("dblclick", {clientX: cx, clientY: cy, bubbles: true})); log("dblclick2", view ? (view.k / fitK()).toFixed(2) + "x fit" : "fit");
+    $("b100").click(); log("btn100_k", view ? view.k.toFixed(2) : "fit");
+    $("bCropView").click(); await wait(600); log("cropView", view && view.crop ? "on solid=" + $("zcrop").classList.contains("solid") : "off");
+    $("bFit").click(); log("fitBtn", view ? "zoomed" : "fit");
+    const hc0 = st.settings.contrast, he0 = st.settings.exposure; clearHistory(st);
+    apply(await api("/api/settings", {settings: {contrast: 0.61}})); await wait(250); apply(await api("/api/settings", {settings: {contrast: 0.62}})); await wait(800);
+    apply(await api("/api/settings", {settings: {exposure: he0 + 0.5}})); await wait(800);
+    log("historySteps", undoStack.length + " (two changes to contrast in one burst + one to exposure = 2)");
+    await undo(); log("undo1", "exposure back=" + (st.settings.exposure === he0) + " contrast=" + st.settings.contrast);
+    await undo(); log("undo2", "contrast back=" + (st.settings.contrast === hc0));
+    await redo(); log("redo1", "contrast=" + st.settings.contrast + " redoLeft=" + redoStack.length);
+    await undo(); await wait(700); log("restored", "contrast=" + (st.settings.contrast === hc0) + " exposure=" + (st.settings.exposure === he0) + " undoLeft=" + undoStack.length);
+  } catch (e) { log("ERROR", e.message + " @ " + (e.stack || "").split("\n")[1]); }
+  const pre = document.createElement("pre"); pre.id = "selftest"; pre.textContent = out.join("\n"); document.body.appendChild(pre);
+}, 2500);
+/* keep the layout in step with the dock's height */
+function syncDock() { document.documentElement.style.setProperty("--dock", dockH() + "px"); if (st && st.has_preview && view) { layout(); settle(); } }
+new ResizeObserver(syncDock).observe($("dock")); syncDock();
+/* Ctrl + scroll anywhere over the Presets section steps through the presets and applies each one. */
+(function presetWheel() {
+  const box = $("preset").closest("details") || $("preset").parentElement;
+  let timer = null;
+  box.addEventListener("wheel", e => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();                                   // otherwise Ctrl + scroll zooms the whole window
+    const sel = $("preset"), n = sel.options.length;
+    if (!n) return;
+    sel.selectedIndex = ((sel.selectedIndex < 0 ? 0 : sel.selectedIndex) + (e.deltaY > 0 ? 1 : -1) + n) % n;
+    say("Preset: " + sel.value);
+    clearTimeout(timer);                                  // fast scrolling applies only where it stops
+    timer = setTimeout(async () => { const name = sel.value; if (await presetCall("apply", name)) { sel.value = name; say("Preset: " + name); } }, 140);
+  }, {passive: false});
+})();
+/* The app window has no reload key of its own, so the page looks after itself: when the page file on disk changes
+   (an update), it reloads as soon as nothing is running and nothing is being dragged. Settings and the picture live
+   in the app, so a reload loses only the zoom position and the undo history. */
+let pageTag = null;
+setInterval(async () => {
+  try {
+    const r = await fetch("/?t=" + Date.now(), {method: "HEAD", cache: "no-store"});
+    const tag = r.headers.get("ETag") || r.headers.get("Last-Modified");
+    if (!tag) return;
+    if (pageTag === null) { pageTag = tag; return; }
+    if (tag !== pageTag && st && st.job.state !== "running" && !dragging && !drag && !curveDrag) location.reload();
+  } catch (e) {}
+}, 4000);
+async function poll() {
+  try { apply(await api("/api/state")); } catch (e) { $("dot").classList.remove("ok"); $("smsg").textContent = "App is not running"; }
+  setTimeout(poll, st && st.job.state === "running" ? 300 : 1200);
+}
+poll();
+</script>
+</body>
+</html>

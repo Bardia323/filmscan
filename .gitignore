@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+out/
+experiments/
+NOTES.md
+settings.json
+presets.json
+power.log
+server.log
+FilmScan.exe
+tools/test4_core.py
+*.bak

@@ -1,0 +1,4 @@
+# Only for the driver research tools in tools/
+capstone>=5.0
+pefile>=2024.8
+frida>=17
