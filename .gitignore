@@ -11,3 +11,4 @@ FilmScan.exe
 tools/test4_core.py
 *.bak
 profiles/
+scan.log

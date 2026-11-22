@@ -59,6 +59,43 @@ class ScannerError(RuntimeError):
         self.code = code
 
 
+def redirect_import(module_base, dll, name, target):
+    """Point one imported function of a loaded 64-bit module at `target` (an address). Returns True if found.
+
+    Only that module's own import table is changed; the rest of the process keeps the real function."""
+    def u32(addr):
+        return C.c_uint32.from_address(addr).value
+
+    pe = module_base + u32(module_base + 0x3C)
+    opt = pe + 24
+    if C.c_uint16.from_address(opt).value != 0x20B:           # PE32+ only
+        return False
+    desc = module_base + u32(opt + 112 + 8)                    # data directory 1: imports
+    if desc == module_base:
+        return False
+    while u32(desc + 12):
+        if C.string_at(module_base + u32(desc + 12)).lower() == dll.lower():
+            names = module_base + (u32(desc) or u32(desc + 16))
+            slots = module_base + u32(desc + 16)
+            i = 0
+            while True:
+                entry = C.c_uint64.from_address(names + 8 * i).value
+                if not entry:
+                    break
+                if not entry >> 63 and C.string_at(module_base + entry + 2) == name:
+                    slot, old = slots + 8 * i, C.c_uint32()
+                    k32 = C.WinDLL("kernel32", use_last_error=True)
+                    k32.VirtualProtect.argtypes = [C.c_void_p, C.c_size_t, C.c_uint32, C.c_void_p]
+                    if not k32.VirtualProtect(slot, 8, 0x04, C.byref(old)):
+                        return False
+                    C.c_uint64.from_address(slot).value = target
+                    k32.VirtualProtect(slot, 8, old.value, C.byref(old))
+                    return True
+                i += 1
+        desc += 20
+    return False
+
+
 class Scanner:
     """One open connection to the scanner. Not thread-safe: call from one thread at a time."""
 
@@ -72,6 +109,22 @@ class Scanner:
             self._drv = C.WinDLL(os.path.join(DRV_DIR, DRV_NAME))
         finally:
             os.chdir(cwd)
+        # The driver reports some failures (a sleeping scanner, for one) with its own debug message box, such as
+        # "SCANAPI_RET_GENERAL_ERROR 14!", which blocks the call until someone clicks it. Its message boxes are
+        # answered here instead and the text kept; the failure still comes back as an error code.
+        self.messages = []
+
+        def _on_message_box(hwnd, text, caption, kind):
+            self.messages.append((text or b"").decode("mbcs", "replace"))
+            del self.messages[:-20]
+            return 1                                           # IDOK
+
+        self._msgbox_cb = C.WINFUNCTYPE(C.c_int, C.c_void_p, C.c_char_p, C.c_char_p, C.c_uint)(_on_message_box)
+        try:
+            self.quiet = redirect_import(self._drv._handle, b"user32.dll", b"MessageBoxA",
+                                         C.cast(self._msgbox_cb, C.c_void_p).value)
+        except Exception:
+            self.quiet = False
         self._drv.SCANAPI_GetFunctionTable.restype = C.c_void_p
         slots = (C.c_void_p * 46).from_address(self._drv.SCANAPI_GetFunctionTable())
 

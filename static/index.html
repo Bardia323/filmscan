@@ -157,6 +157,7 @@
   <h2>Film base</h2>
   <div class="row"><i id="swatch"></i><span id="baseTxt" style="flex:1;color:var(--dim)"></span><button id="bLock"></button></div>
   <div class="btns"><button id="bBaseAuto">Measure from frame</button><button id="bBasePick">Pick on image</button></div>
+  <div class="row" id="baseRecallRow" hidden><select id="baseRecall" title="Go back to a film base used earlier, or take the one stored in a preset. Tone and colour settings are left alone."></select></div>
   <p class="note">Measured once and held for the whole roll, so colour cannot drift between frames.</p>
 
   <h2>Tone</h2>
@@ -179,6 +180,8 @@
   <div id="colourSec"><h2>Colour</h2>
   <div class="row"><label>Warmth</label><input type="range" id="temp" min="-1.5" max="1.5" step="0.01"><output></output></div>
   <div class="row"><label>Tint</label><input type="range" id="tint" min="-1.5" max="1.5" step="0.01"><output></output></div>
+  <div class="row" title="Colour of the dark tones only. Does what shifting the film base does, without touching the base."><label>Shadow warmth</label><input type="range" id="shadow_temp" min="-1" max="1" step="0.01"><output></output></div>
+  <div class="row" title="Colour of the dark tones only: green to magenta."><label>Shadow tint</label><input type="range" id="shadow_tint" min="-1" max="1" step="0.01"><output></output></div>
   <div class="row"><label>Saturation</label><input type="range" id="saturation" min="0" max="2" step="0.01"><output></output></div>
   <div class="btns"><button id="bNeutral">Pick neutral</button><button id="bRestore" title="Rebalance the three colour layers of faded film">Restore fading</button></div></div>
 
@@ -200,7 +203,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const SLIDERS = ["exposure", "contrast", "white", "black", "shadows", "highlights", "gamma", "temp", "tint", "saturation", "angle"];
+const SLIDERS = ["exposure", "contrast", "white", "black", "shadows", "highlights", "gamma", "temp", "tint", "shadow_temp", "shadow_tint", "saturation", "angle"];
 let st = null, pickMode = null, shownVersion = -1, imgBusy = false, imgWanted = false, sendTimer = null, lastJob = 0;
 
 async function api(path, body) {
@@ -229,16 +232,29 @@ function fillSpaces(s) {
 
 /* ---- undo / redo ----
    A snapshot is everything that changes how the picture looks or is framed. A burst of changes (dragging a slider,
-   moving a crop edge) becomes one step once it has been still for half a second. A new preview or scan starts a
-   fresh history, so undo never reaches back into another frame. */
+   moving a crop edge) becomes one step once it has been still for half a second. History is kept through a scan,
+   a new preview and a page reload. A step recorded on another picture (the preview before the scan, say) gives back
+   its tone and colour but not its crop or rotation, which belong to that picture. */
 const undoStack = [], redoStack = [];
-let settled = null, beforeBurst = null, burstTimer = null;
+const GEOMETRY = ["crop", "angle", "rotate", "flip_h", "flip_v"];
+let settled = null, beforeBurst = null, burstTimer = null, histSrc = null;
 function snapOf(s) { return JSON.stringify({settings: s.settings, base_locked: s.base_locked, auto_exposure: s.auto_exposure}); }
-function showHistory() { $("bUndo").disabled = !undoStack.length; $("bRedo").disabled = !redoStack.length; }
+function histKey(s) { return s.viewing + ":" + (s.src_size || []).slice().sort((x, y) => x - y).join("x"); }
+function showHistory() {
+  $("bUndo").disabled = !undoStack.length; $("bRedo").disabled = !redoStack.length;
+  try { sessionStorage.setItem("history", JSON.stringify({u: undoStack, r: redoStack})); } catch (e) {}
+}
 function clearHistory(s) { undoStack.length = redoStack.length = 0; clearTimeout(burstTimer); burstTimer = beforeBurst = null; settled = snapOf(s); showHistory(); }
 function trackHistory(s) {
-  const now = snapOf(s);
-  if (settled === null) { settled = now; showHistory(); return; }
+  const now = snapOf(s), key = histKey(s);
+  if (settled === null) {                                           // page just loaded: pick up the history it had
+    try { const h = JSON.parse(sessionStorage.getItem("history") || "null");
+      if (h) { for (const e of h.u || []) if (e && e.snap) undoStack.push(e); for (const e of h.r || []) if (e && e.snap) redoStack.push(e); } } catch (e) {}
+    settled = now; histSrc = key; showHistory(); return;
+  }
+  if (key !== histSrc) {                                            // another picture on screen: not a step in itself
+    clearTimeout(burstTimer); burstTimer = beforeBurst = null; settled = now; histSrc = key; return;
+  }
   if (now === settled && !burstTimer) return;
   if (s.job.state === "running") { settled = now; return; }        // changes made by a running job are not steps
   if (!burstTimer) beforeBurst = settled;
@@ -246,22 +262,47 @@ function trackHistory(s) {
   burstTimer = setTimeout(() => {
     burstTimer = null;
     const cur = snapOf(st);
-    if (cur !== beforeBurst) { undoStack.push(beforeBurst); if (undoStack.length > 200) undoStack.shift(); redoStack.length = 0; }
+    if (cur !== beforeBurst) { undoStack.push({snap: beforeBurst, src: histSrc}); if (undoStack.length > 200) undoStack.shift(); redoStack.length = 0; }
     settled = cur; beforeBurst = null; showHistory();
   }, 500);
 }
 async function stepHistory(from, to, word) {
   if (burstTimer) {                                                 // finish the burst in progress first
     clearTimeout(burstTimer); burstTimer = null;
-    const cur = snapOf(st); if (cur !== beforeBurst) { undoStack.push(beforeBurst); redoStack.length = 0; } settled = cur; beforeBurst = null;
+    const cur = snapOf(st); if (cur !== beforeBurst) { undoStack.push({snap: beforeBurst, src: histSrc}); redoStack.length = 0; } settled = cur; beforeBurst = null;
   }
   if (!from.length) { say("Nothing to " + word); return; }
   if (st.job.state === "running") { say("Wait for the scan to finish"); return; }
-  const target = from.pop(); to.push(settled); settled = target; showHistory();
-  try { apply(await api("/api/settings", JSON.parse(target)), false); say(word === "undo" ? "Undone" : "Redone"); }
+  const target = from.pop(); to.push({snap: settled, src: histSrc}); showHistory();
+  const body = JSON.parse(target.snap);
+  if (target.src !== histSrc) for (const k of GEOMETRY) delete body.settings[k];
+  try { const r = await api("/api/settings", body); settled = snapOf(r); apply(r, false); say(word === "undo" ? "Undone" : "Redone"); }
   catch (e) {}
 }
 const undo = () => stepHistory(undoStack, redoStack, "undo"), redo = () => stepHistory(redoStack, undoStack, "redo");
+
+/* ---- film bases to go back to: the ones used earlier (kept by the app) and the ones stored in presets ---- */
+let presetBases = {}, baseSig = "";
+function fillBases(s) {
+  const cur = s.settings.base, same = (p, q) => p.every((v, i) => Math.abs(v - q[i]) <= 0.0005 * Math.max(v, q[i], 1));
+  const recent = (s.base_history || []).filter(b => !same(b, cur)), named = [];
+  for (const [name, b] of Object.entries(presetBases)) {
+    if (!b || same(b, cur) || recent.some(r => same(r, b))) continue;
+    const hit = named.find(n => same(n.base, b));
+    if (hit) hit.names.push(name); else named.push({base: b, names: [name]});
+  }
+  const sig = JSON.stringify([recent, named]);
+  if (sig === baseSig) return;
+  baseSig = sig;
+  const sel = $("baseRecall"); sel.innerHTML = "";
+  const txt = b => b.map(v => Math.round(v)).join(" / ");
+  const add = (parent, label, base) => { const o = document.createElement("option"); o.textContent = label; o.value = base ? JSON.stringify(base) : ""; parent.appendChild(o); };
+  add(sel, "Earlier film bases…", null);
+  const group = label => { const g = document.createElement("optgroup"); g.label = label; sel.appendChild(g); return g; };
+  if (recent.length) { const g = group("Used before (newest first)"); recent.forEach(b => add(g, txt(b), b)); }
+  if (named.length) { const g = group("Stored in presets"); named.forEach(n => add(g, n.names.join(", ") + "  (" + txt(n.base) + ")", n.base)); }
+  $("baseRecallRow").hidden = !recent.length && !named.length;
+}
 
 function apply(s, fromUser) {
   st = s;
@@ -296,7 +337,8 @@ function apply(s, fromUser) {
     if (document.activeElement !== $("out_dir")) $("out_dir").value = s.out_dir;
     $("dpi").value = s.scan_dpi; $("pdpi").value = s.preview_dpi; $("fmt").value = s.fmt; fillSpaces(s); $("cspace").value = s.colorspace; $("samples").value = s.samples; $("mexp").value = s.multi_exposure; $("film").value = s.settings.mono ? (s.settings.negative ? "bw" : "bwslide") : (s.settings.negative ? "neg" : "slide");
   }
-  for (const k of SLIDERS) $(k).nextElementSibling.textContent = (+$(k).value).toFixed(2);
+  for (const k of SLIDERS) { $(k).nextElementSibling.textContent = (+$(k).value).toFixed(2); const row = $(k).closest(".row"); if (row) row.hidden = !(k in s.settings); }
+  fillBases(s);
   const mono = s.settings.mono, irOn = s.infrared && !mono;
   $("bwNote").hidden = !mono; ($("colourSec").closest("details") || $("colourSec")).hidden = mono; $("cspace").disabled = mono;
   markSeg("segIR", irOn ? nearest(PRESETS.ir, s.settings.dust_threshold, "t") : 0, mono);
@@ -316,7 +358,7 @@ function apply(s, fromUser) {
     : "Close and reopen the app to finish an update.";
   $("file").textContent = (s.last_file ? "Scan: " + s.last_file : "") + (s.last_crop ? "\nCropped copy: " + s.last_crop : ""); $("file").style.whiteSpace = "pre-line";
   const srcKey = s.viewing + ":" + (s.src_size || []).join("x") + ":" + s.settings.rotate;
-  if (srcKey !== lastSrcKey) { if (lastSrcKey) clearHistory(s); lastSrcKey = srcKey; view = null; }             // new picture: back to the whole frame
+  if (srcKey !== lastSrcKey) { lastSrcKey = srcKey; view = null; }             // new picture: back to the whole frame
   if (!s.has_preview) view = null;
   $("empty").hidden = s.has_preview; $("frame").hidden = !s.has_preview || !!view;
   $("zoomWrap").style.display = s.has_preview && view ? "block" : "none"; $("viewbar").style.display = s.has_preview ? "flex" : "none";
@@ -385,7 +427,7 @@ async function refreshImage(patch) {
     do {
       imgWanted = false;
       const body = pending; pending = null;
-      let url = "/api/image?t=" + Date.now() + (boost ? "&boost=1" : ""), rect = null;
+      let url = "/api/image?t=" + Date.now() + (boost ? "&boost=1" : "") + (pickMode === "base" ? "&plain=1" : ""), rect = null;
       if (view && st && st.src_size) {
         rect = wantedRect();
         if (rect) {
@@ -514,6 +556,7 @@ buildSeg("segIR", i => push(i === 0 ? {infrared: false} : {infrared: true, setti
 buildSeg("segSharpen", i => push({settings: {sharpen: PRESETS.sharpen[i].v}}, true));
 buildSeg("segGrain", i => push({settings: {grain: PRESETS.grain[i].v}}, true));
 $("bLock").onclick = () => push({base_locked: !st.base_locked}, true);
+$("baseRecall").onchange = () => { const v = $("baseRecall").value; $("baseRecall").selectedIndex = 0; if (v) { push({settings: {base: JSON.parse(v)}, base_locked: true}, true); say("Film base restored and held"); } };
 $("bAutoExpMode").onclick = () => push({auto_exposure: !st.auto_exposure}, true);
 $("bFlipH").onclick = () => push({settings: {flip_h: !st.settings.flip_h, crop: [0, 0, 1, 1]}}, true);
 $("bFlipV").onclick = () => push({settings: {flip_v: !st.settings.flip_v, crop: [0, 0, 1, 1]}}, true);
@@ -534,6 +577,7 @@ $("bOpenRaw").onclick = async () => { say("Opening…"); try { apply(await api("
 
 /* presets */
 function fillPresets(p) {
+  presetBases = p.bases || {}; if (st) fillBases(st);
   const sel = $("preset"), keep = sel.value; sel.innerHTML = "";
   const group = (label, names) => { if (!names.length) return; const g = document.createElement("optgroup"); g.label = label;
     names.forEach(n => { const o = document.createElement("option"); o.value = o.textContent = n; g.appendChild(o); }); sel.appendChild(g); };
@@ -562,10 +606,11 @@ $("bPreview").onclick = job("preview"); $("bScan").onclick = job("scan"); $("bRe
 /* ---- picking ---- */
 function setPick(mode) {
   if (mode && view) setView(null);
-  pickMode = mode; $("frame").classList.toggle("pick", !!mode);
+  const plainChange = (pickMode === "base") !== (mode === "base");
+  pickMode = mode; if (plainChange) refreshImage(); $("frame").classList.toggle("pick", !!mode);
   $("bBasePick").classList.toggle("on", mode === "base"); $("bNeutral").classList.toggle("on", mode === "neutral");
   $("hint").style.display = mode ? "block" : "none";
-  $("hint").textContent = mode === "base" ? "Click clear, unexposed film (edge between frames)"
+  $("hint").textContent = mode === "base" ? "Click clear, unexposed film (edge between frames). The grey mask is off while you pick."
     : mode === "loupe" ? "Click the spot you want to inspect at 100%" : "Click something that should be grey or white";
 }
 $("bBasePick").onclick = () => setPick(pickMode === "base" ? null : "base");

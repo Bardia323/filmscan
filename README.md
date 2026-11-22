@@ -34,7 +34,8 @@ Scroll to zoom, drag to pan, Ctrl+Z to undo.
 - Film base measured once and held for the roll, so colour does not drift between frames
 - Preview and saved file use the same processing, so they match
 - Infrared dust removal, sharpening and grain reduction (Off / Light / Medium / Heavy)
-- Exposure, contrast, black and white point, shadows, highlights, curves (all channels and per channel)
+- Exposure, contrast, black and white point, shadows, highlights, shadow colour, curves (all channels and per channel)
+- Scan is matched to the preview it was graded on; undo history survives scans; earlier film bases can be recalled
 - Multi-pass averaging and multi-exposure for cleaner dense areas
 - 900 to 7200 dpi; 48-bit TIFF, 24-bit TIFF or JPEG; sRGB, Adobe RGB or ProPhoto
 - Print output: any CMYK or print RGB profile installed in Windows (ISO Coated v2 / FOGRA39, PSO, SWOP, eciRGB ...), or dropped into a `profiles` folder; saved 8-bit with the profile embedded

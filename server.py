@@ -30,6 +30,13 @@ PORT = 8765
 app = Flask(__name__, static_folder=os.path.join(HERE, "static"), static_url_path="/static")
 
 
+BASE_HISTORY = 12
+
+
+def same_base(a, b):
+    return all(abs(x - y) <= 0.0005 * max(x, y, 1.0) for x, y in zip(a, b))
+
+
 class State:
     def __init__(self):
         self.lock = threading.RLock()
@@ -56,6 +63,9 @@ class State:
         self.last_file = None
         self.last_crop = None
         self.art_crop = (0.0, 0.0, 1.0, 1.0)   # second crop, on the finished scan
+        self.base_history = []            # film bases used before the current one, newest first
+        self._seen_base = None
+        self.level_match = None           # per-channel gain applied to the last scan to match its preview
         self.version = 0                  # bumps whenever the picture would look different
         self.scanner = None
         self.scanner_ok = False
@@ -69,6 +79,7 @@ class State:
         except Exception:
             return
         self.settings = film.Settings.from_dict(d.get("settings", {}))
+        self.base_history = [tuple(float(v) for v in b) for b in d.get("base_history", []) if len(b) == 3][:BASE_HISTORY]
         for k in ("base_locked", "auto_exposure", "out_dir", "scan_dpi", "preview_dpi", "infrared", "fmt", "save_raw", "jpeg_quality", "samples", "colorspace", "multi_exposure"):
             if k in d:
                 setattr(self, k, d[k])
@@ -77,7 +88,8 @@ class State:
         d = dict(settings=self.settings.to_dict(), base_locked=self.base_locked, auto_exposure=self.auto_exposure,
                  out_dir=self.out_dir, scan_dpi=self.scan_dpi, preview_dpi=self.preview_dpi, infrared=self.infrared,
                  fmt=self.fmt, save_raw=self.save_raw, jpeg_quality=self.jpeg_quality,
-                 samples=self.samples, colorspace=self.colorspace, multi_exposure=self.multi_exposure)
+                 samples=self.samples, colorspace=self.colorspace, multi_exposure=self.multi_exposure,
+                 base_history=[list(b) for b in self.base_history])
         tmp = STATE_FILE + ".tmp"
         json.dump(d, open(tmp, "w"), indent=1)
         os.replace(tmp, STATE_FILE)
@@ -99,8 +111,20 @@ class State:
             d["crop"] = list(self.art_crop)
         return d
 
+    def note_base(self):
+        """Keep the film bases that get replaced, however that happens (pick, measure, preset, undo), so a base
+        is never lost. Caller holds the lock."""
+        cur = tuple(float(v) for v in self.settings.base)
+        old = self._seen_base
+        self._seen_base = cur
+        if old is None or same_base(old, cur):
+            return
+        self.base_history = ([old] + [b for b in self.base_history
+                                      if not same_base(b, old) and not same_base(b, cur)])[:BASE_HISTORY]
+
     def public(self):
         with self.lock:
+            self.note_base()
             return dict(settings=self.shown_settings(), base_locked=self.base_locked,
                         auto_exposure=self.auto_exposure, out_dir=self.out_dir, scan_dpi=self.scan_dpi,
                         infrared=self.infrared, fmt=self.fmt, preview_dpi=self.preview_dpi, save_raw=self.save_raw,
@@ -111,6 +135,7 @@ class State:
                         viewing="scan" if self.full_rgb is not None else "preview",
                         has_full=self.full_rgb is not None, full_dpi=self.full_dpi, last_file=self.last_file,
                         last_crop=self.last_crop, crop_on_scan=True,
+                        base_history=[list(b) for b in self.base_history], level_match=self.level_match,
                         version=self.version, scanner_ok=self.scanner_ok, scanner_msg=self.scanner_msg,
                         job=dict(self.job))
 
@@ -189,7 +214,17 @@ def start_job(kind, fn):
 
     def run():
         try:
-            fn()
+            try:
+                fn()
+            except ScannerError:
+                if kind not in ("preview", "scan") or S.cancel:
+                    raise
+                # The link may only be stale (the scanner slept and was woken): connect again and try once more.
+                with S.lock:
+                    S.scanner_ok = False
+                set_job(0.0, "reconnecting to the scanner")
+                time.sleep(1.0)
+                fn()
             with S.lock:
                 S.job.update(state="done", progress=1.0)
         except Cancelled:
@@ -201,6 +236,8 @@ def start_job(kind, fn):
                 S.job.update(state="error", error=str(e))
                 if isinstance(e, ScannerError):
                     S.scanner_ok, S.scanner_msg = False, str(e)
+                    S.job["error"] = ("The scanner is not answering. It is probably asleep: press its power button, "
+                                      "wait until the light is steady, then try again. (" + str(e) + ")")
 
     threading.Thread(target=run, daemon=True).start()
     return True
@@ -268,10 +305,41 @@ def small_copy(a, dpi):
     return cv2.resize(a, (max(8, int(a.shape[1] * f)), max(8, int(a.shape[0] * f))), interpolation=cv2.INTER_AREA)
 
 
-def adopt_scan(rgb, ir, dpi):
+def level_gain(scan, preview):
+    """Per-channel gain that brings a scan to the levels of the preview of the same frame, or None.
+
+    The scanner calibrates before every pass and does not land on exactly the same levels each time, least of all
+    at a different resolution. On thin negatives, where the picture sits close to the film base, a difference of
+    one percent is a visible colour shift. The settings were chosen looking at the preview, so the scan follows it.
+    Returns None when the two do not look like the same frame."""
+    ph, pw = preview.shape[:2]
+    if abs(scan.shape[1] / scan.shape[0] - pw / ph) > 0.02:
+        return None
+    f = max(1, scan.shape[1] // 1600)                        # thin the scan first so the resize stays cheap
+    small = cv2.resize(scan[::f, ::f].astype(np.float32), (pw, ph), interpolation=cv2.INTER_AREA)
+    sigma = max(2.0, pw / 200.0)
+    win = (slice(ph // 6, ph - ph // 6), slice(pw // 6, pw - pw // 6))
+    a = cv2.GaussianBlur(small, (0, 0), sigma)[win].reshape(-1, 3)
+    b = cv2.GaussianBlur(preview.astype(np.float32), (0, 0), sigma)[win].reshape(-1, 3)
+    ok = (a.min(axis=1) > 1500) & (b.min(axis=1) > 1500) & (a.max(axis=1) < 60000) & (b.max(axis=1) < 60000)
+    if ok.sum() < 2000:
+        return None
+    ratio = b[ok] / a[ok]
+    gain = np.median(ratio, axis=0)
+    spread = np.percentile(ratio, 75, axis=0) - np.percentile(ratio, 25, axis=0)
+    if np.any(np.abs(gain - 1.0) > 0.08) or np.any(spread > 0.04):
+        return None                                        # not the same picture (film moved or changed)
+    return tuple(float(g) for g in gain)
+
+
+def adopt_scan(rgb, ir, dpi, gain=None):
     """Make sensor data the scan in memory (cut to the film crop). Caller holds S.lock."""
     frame = film.Settings.from_dict(S.settings.to_dict())
     S.full_rgb, S.full_ir = bake(rgb, ir, frame)
+    S.level_match = gain
+    if gain is not None and any(abs(g - 1.0) > 0.001 for g in gain):
+        for c in range(3):
+            S.full_rgb[..., c] = np.clip(S.full_rgb[..., c] * np.float32(gain[c]) + 0.5, 0, 65535).astype(np.uint16)
     S.full_dpi = dpi
     S.art_crop = (0.0, 0.0, 1.0, 1.0)
     S.preview_rgb, S.preview_ir = small_copy(S.full_rgb, dpi), small_copy(S.full_ir, dpi)
@@ -368,6 +436,14 @@ def write_output(rgb, ir, settings, fmt, dpi, path=None):
     return path
 
 
+def log_line(text):
+    try:
+        with open(os.path.join(HERE, "scan.log"), "a", encoding="utf-8") as f:
+            f.write(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S ") + text + "\n")
+    except OSError:
+        pass
+
+
 def job_scan():
     with S.lock:
         dpi, infrared, fmt = int(S.scan_dpi), bool(S.infrared) and not S.settings.mono, S.fmt
@@ -391,8 +467,17 @@ def job_scan():
         raise RuntimeError("scan ended early")
     set_job(0.87, "developing")
     with S.lock:
+        sensor_preview = S.preview_rgb if S.full_rgb is None else None      # only a preview of the whole sensor frame counts
+    gain = None
+    if sensor_preview is not None:
+        try:
+            gain = level_gain(r["rgb"], sensor_preview)
+        except Exception:
+            gain = None
+        log_line("level match scan->preview: " + ("none" if gain is None else " ".join(f"{g:.4f}" for g in gain)))
+    with S.lock:
         keep_raw = S.save_raw
-        adopt_scan(r["rgb"], r["ir"], dpi)                 # the scan is the film crop of what the sensor saw
+        adopt_scan(r["rgb"], r["ir"], dpi, gain)                 # the scan is the film crop of what the sensor saw
         rgb, ir, settings = S.full_rgb, S.full_ir, whole(active_settings())
     path = write_output(rgb, ir, settings, fmt, dpi)
     if keep_raw:
@@ -508,7 +593,7 @@ def _paint_holder(img, holder):
     return img
 
 
-def render_fit(boost=False):
+def render_fit(boost=False, plain=False):
     """Whole frame at screen size (uint8). Slider moves only redo the cheap tone step."""
     got = _sources()
     if got is None:
@@ -516,10 +601,12 @@ def render_fit(boost=False):
     rgb, ir, s, version = got
     with _disp_lock:
         _ensure(rgb, ir, s)
-        img = film.finish_display(_disp["fit"], _disp["holder_fit"], _for_screen(s, boost), _disp["scale"] * _disp["fit_f"])
-        if not boost:
+        # plain: nothing is masked, so clear film next to the holder can be seen and clicked (picking the film base)
+        holder = None if plain else _disp["holder_fit"]
+        img = film.finish_display(_disp["fit"], holder, _for_screen(s, boost), _disp["scale"] * _disp["fit_f"])
+        if not boost and not plain:
             _last.update(version=version, img=img.copy())          # histogram reads the true picture
-        img = _paint_holder(img, _disp["holder_fit"])
+        img = _paint_holder(img, holder)
     return img
 
 
@@ -619,7 +706,7 @@ def api_image():
         save_soon()
     with S.lock:
         version = S.version
-    img = render_fit(boost=request.args.get("boost") == "1")
+    img = render_fit(boost=request.args.get("boost") == "1", plain=request.args.get("plain") == "1")
     if img is None:
         return ("", 204)
     return _jpeg(img, version)
@@ -746,7 +833,7 @@ BUILTIN_PRESETS = {
     "Look: soft": dict(contrast=0.10, gamma=1.45, saturation=0.95, shadows=0.2, highlights=-0.15),
 }
 PRESET_KEYS = ("negative", "mono", "base", "wb", "gamma", "contrast", "black", "white", "shadows", "highlights", "curve",
-               "saturation", "temp", "tint", "sharpen", "grain", "dust_threshold", "dust_grow")
+               "saturation", "temp", "tint", "shadow_temp", "shadow_tint", "sharpen", "grain", "dust_threshold", "dust_grow")
 
 
 def load_presets():
@@ -796,7 +883,8 @@ def api_presets():
                 tmp = PRESET_FILE + ".tmp"
                 json.dump(user, open(tmp, "w"), indent=1)
                 os.replace(tmp, PRESET_FILE)
-    return jsonify(builtin=list(BUILTIN_PRESETS), user=sorted(user), state=S.public())
+    return jsonify(builtin=list(BUILTIN_PRESETS), user=sorted(user), state=S.public(),
+                   bases={k: v["base"] for k, v in user.items() if isinstance(v, dict) and v.get("base")})
 
 
 def load_raw_file(path):

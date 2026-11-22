@@ -46,6 +46,8 @@ class Settings:
     holder: bool = True                        # look for the film holder at the edges and render it black
     dust_threshold: float = 0.07               # IR drop (fraction) that counts as a defect
     dust_grow: float = 2.5                     # mask growth in pixels at 3600 dpi
+    shadow_temp: float = 0.0                   # colour of the dark tones: warm(+)/cool(-), an offset per channel
+    shadow_tint: float = 0.0                   # colour of the dark tones: magenta(+)/green(-)
 
     def to_dict(self):
         return asdict(self)
@@ -188,12 +190,18 @@ def _scene_from_t(t, s):
         wbt = np.array([2.0 ** (s.temp * 0.5 + s.tint * 0.15), 2.0 ** (-s.tint * 0.3),
                         2.0 ** (-s.temp * 0.5 + s.tint * 0.15)], np.float32)
         scene = scene * (gain * wbt)
+        if s.shadow_temp or s.shadow_tint:
+            # A per-channel offset: colours the dark tones and leaves the light ones almost alone. This is what a
+            # shifted film base does to the picture, offered as a control so the base can stay a measurement.
+            a, b = SHADOW_RANGE * s.shadow_temp, SHADOW_RANGE * s.shadow_tint
+            scene = scene + np.array([a + 0.5 * b, -b, -a + 0.5 * b], np.float32)
     if s.black or s.white != 1.0:
         scene = (scene - s.black) / max(1e-3, s.white - s.black)
     return scene.astype(np.float32)
 
 
 _CURVE_N = 4096
+SHADOW_RANGE = 0.05                # scene-linear offset at a shadow colour slider's end (mid grey is 0.18)
 
 
 def curve_points(pts):
