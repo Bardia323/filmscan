@@ -193,7 +193,7 @@
   <h2>Output</h2>
   <div class="row"><input type="text" id="out_dir" spellcheck="false"></div>
   <div class="btns" style="margin-bottom:6px"><button id="bRaw" title="Also save the untouched 16-bit sensor data (with infrared) next to each scan"></button></div>
-  <div class="btns" style="margin-bottom:6px"><button id="bReprocess" title="Write the scan file again with the current colour settings">Save over scan</button><button id="bSaveCrop" title="Save the area inside the box as its own file next to the scan">Save cropped copy</button><button id="bFolder">Open folder</button></div>
+  <div class="btns" style="margin-bottom:6px"><button id="bReprocess" title="Write the scan file again with the current colour settings">Save over scan</button><button id="bSaveVersion" title="Save the whole scan with the current settings as a new file (name_v2, _v3 ...). The scan file is left as it is.">Save as version</button><button id="bSaveCrop" title="Save the area inside the box as its own file next to the scan">Save cropped copy</button><button id="bFolder">Open folder</button></div>
   <div class="btns" style="margin-top:6px"><button id="bOpenRaw" title="Load a saved raw scan and develop it again with the current settings">Open raw scan…</button></div>
   <div id="file"></div>
   <p class="note" id="saveNote"></p>
@@ -312,6 +312,7 @@ function apply(s, fromUser) {
   const busy = s.job.state === "running";
   $("bPreview").disabled = $("bScan").disabled = busy;
   $("bReprocess").disabled = $("bSaveCrop").disabled = busy || !s.has_full;
+  $("bSaveVersion").disabled = busy || !s.has_full || !s.versions; $("bSaveVersion").title = s.versions ? "Save the whole scan with the current settings as a new file (name_v2, _v3 ...). The scan file is left as it is." : "Close and reopen the app to enable this.";
   const scanning = busy && (s.job.kind === "scan" || s.job.kind === "preview");
   $("bCancel").hidden = !scanning;
   // while the scanner runs, the frame stays put: no crop, rotate, flip or straighten
@@ -356,7 +357,7 @@ function apply(s, fromUser) {
   $("saveNote").textContent = s.crop_on_scan
     ? "On a preview the box is the film crop: the scan is saved cut to it. After scanning, the box is a second crop on the scan: Save cropped copy writes that as its own file. Save over scan rewrites the scan with your colour changes."
     : "Close and reopen the app to finish an update.";
-  $("file").textContent = (s.last_file ? "Scan: " + s.last_file : "") + (s.last_crop ? "\nCropped copy: " + s.last_crop : ""); $("file").style.whiteSpace = "pre-line";
+  $("file").textContent = (s.last_file ? "Scan: " + s.last_file : "") + (s.last_version ? "\nVersion: " + s.last_version : "") + (s.last_crop ? "\nCropped copy: " + s.last_crop : ""); $("file").style.whiteSpace = "pre-line";
   const srcKey = s.viewing + ":" + (s.src_size || []).join("x") + ":" + s.settings.rotate;
   if (srcKey !== lastSrcKey) { lastSrcKey = srcKey; view = null; }             // new picture: back to the whole frame
   if (!s.has_preview) view = null;
@@ -601,7 +602,7 @@ $("bFolder").onclick = () => api("/api/open_folder", {});
 $("bCancel").onclick = async () => { try { apply(await api("/api/cancel", {})); } catch (e) {} };
 $("bQuit").onclick = async () => { try { await api("/api/quit", {}); say("App closed. Scanner released."); setTimeout(() => window.close(), 300); } catch (e) {} };
 const job = kind => async () => { try { apply(await api("/api/job", {kind})); } catch (e) {} };
-$("bPreview").onclick = job("preview"); $("bScan").onclick = job("scan"); $("bReprocess").onclick = job("reprocess"); $("bSaveCrop").onclick = job("save_crop");
+$("bPreview").onclick = job("preview"); $("bScan").onclick = job("scan"); $("bReprocess").onclick = job("reprocess"); $("bSaveCrop").onclick = job("save_crop"); $("bSaveVersion").onclick = job("save_version");
 
 /* ---- picking ---- */
 function setPick(mode) {

@@ -24,7 +24,7 @@ Then double-click `FilmScan.exe`. Close any other scanning program first; only o
 
 1. **Preview.** The crop box fits itself to the frame; adjust the edges if needed.
 2. **Scan.** The file is saved cropped to the box, in the output folder.
-3. Adjust tone and colour on the scan, then **Save over scan**. Draw a second crop and **Save cropped copy** for a tighter version.
+3. Adjust tone and colour on the scan, then **Save over scan**, or **Save as version** to keep the original and write `name_v2`, `_v3` ... beside it. Draw a second crop and **Save cropped copy** for a tighter version.
 
 Scroll to zoom, drag to pan, Ctrl+Z to undo.
 

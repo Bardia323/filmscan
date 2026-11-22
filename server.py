@@ -62,6 +62,7 @@ class State:
         self.full_dpi = None
         self.last_file = None
         self.last_crop = None
+        self.last_version = None
         self.art_crop = (0.0, 0.0, 1.0, 1.0)   # second crop, on the finished scan
         self.base_history = []            # film bases used before the current one, newest first
         self._seen_base = None
@@ -134,7 +135,7 @@ class State:
                         has_preview=self.preview_rgb is not None, src_size=self.src_size(),
                         viewing="scan" if self.full_rgb is not None else "preview",
                         has_full=self.full_rgb is not None, full_dpi=self.full_dpi, last_file=self.last_file,
-                        last_crop=self.last_crop, crop_on_scan=True,
+                        last_crop=self.last_crop, crop_on_scan=True, last_version=self.last_version, versions=True,
                         base_history=[list(b) for b in self.base_history], level_match=self.level_match,
                         version=self.version, scanner_ok=self.scanner_ok, scanner_msg=self.scanner_msg,
                         job=dict(self.job))
@@ -484,7 +485,7 @@ def job_scan():
         set_job(0.95, "saving raw")
         write_raw(r["rgb"], r["ir"], dpi, os.path.splitext(path)[0] + "_raw.tif")     # raw keeps the whole sensor frame
     with S.lock:
-        S.last_file, S.last_crop = path, None
+        S.last_file, S.last_crop, S.last_version = path, None, None
     set_job(0.97, "preparing view")
     render_fit()                                           # build the full-resolution view cache now, not on first zoom
     set_job(1.0, f"saved {os.path.basename(path)}")
@@ -506,6 +507,23 @@ def job_reprocess():
     path = write_output(rgb, ir, whole(settings), fmt, dpi, path)
     with S.lock:
         S.last_file = path
+    set_job(1.0, f"saved {os.path.basename(path)}")
+
+
+def job_save_version():
+    """Save the whole scan with the current settings as a new file next to it: <name>_v2.<ext>, _v3 ...
+    The scan file itself is left as it is."""
+    rgb, ir, dpi, fmt, settings, last = scan_in_memory()
+    ext = "jpg" if fmt == "jpeg" else "tif"
+    stem = os.path.splitext(last)[0] if last else os.path.splitext(next_filename(ext))[0]
+    n = 2
+    while any(os.path.exists(f"{stem}_v{n}.{e}") for e in ("tif", "jpg")):
+        n += 1
+    path = f"{stem}_v{n}.{ext}"
+    set_job(0.2, "developing version")
+    write_output(rgb, ir, whole(settings), fmt, dpi, path)
+    with S.lock:
+        S.last_version = path
     set_job(1.0, f"saved {os.path.basename(path)}")
 
 
@@ -906,7 +924,7 @@ def load_raw_file(path):
         if not S.base_locked:
             S.settings.base = film.measure_base(small_copy(rgb, dpi))
         adopt_scan(rgb, ir, dpi)
-        S.last_file = S.last_crop = None
+        S.last_file = S.last_crop = S.last_version = None
         if S.auto_exposure:
             S.settings.exposure = round(film.auto_exposure(S.preview_rgb, active_settings()), 2)
         S.save()
@@ -939,7 +957,7 @@ def api_open_raw():
 @app.post("/api/job")
 def api_job():
     kind = request.get_json(force=True).get("kind")
-    fn = dict(preview=job_preview, scan=job_scan, reprocess=job_reprocess, save_crop=job_save_crop).get(kind)
+    fn = dict(preview=job_preview, scan=job_scan, reprocess=job_reprocess, save_crop=job_save_crop, save_version=job_save_version).get(kind)
     if fn is None:
         return jsonify(error="unknown job"), 400
     if not start_job(kind, fn):
