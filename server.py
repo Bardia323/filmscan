@@ -732,9 +732,13 @@ def api_image():
 
 @app.get("/api/histogram")
 def api_histogram():
+    with S.lock:
+        version = S.version
+    if _last["img"] is None or _last["version"] != version:
+        # The zoomed view, "Find edges" and base picking draw the picture without going through the whole-frame
+        # render the histogram reads from, so bring that up to date first.
+        render_fit()
     img = _last["img"]
-    if img is None:
-        img = render_preview()
     if img is None:
         return jsonify(None)
     with S.lock:
